@@ -1,0 +1,6 @@
+@HeThongHoTroChoThueThietBi_BE_HostAddress = http://localhost:5118
+
+GET {{HeThongHoTroChoThueThietBi_BE_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
