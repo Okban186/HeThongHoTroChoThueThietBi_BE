@@ -57,50 +57,6 @@ public sealed class AuthController(AppDbContext db, TokenService tokens) : Contr
         });
     }
 
-    [AllowAnonymous, HttpPost("refresh")]
-    public async Task<IActionResult> Refresh(RefreshRequest request, CancellationToken ct)
-    {
-        var hash = TokenService.HashRefreshToken(request.RefreshToken);
-        var old = await db.RefreshTokens.SingleOrDefaultAsync(x => x.TokenHash == hash, ct);
-        if (old is null) return Unauthorized();
-        if (old.RevokedAt is not null)
-        {
-            // Reuse of a rotated/revoked token: revoke every refresh token in this family.
-            var family = await db.RefreshTokens.Where(x => x.FamilyId == old.FamilyId && x.RevokedAt == null).ToListAsync(ct);
-            foreach (var item in family) item.RevokedAt = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(ct);
-            return Unauthorized(new { message = "Refresh token reuse detected. Session revoked." });
-        }
-        if (old.ExpiresAt <= DateTimeOffset.UtcNow) return Unauthorized();
-
-        var user = await db.Users.SingleOrDefaultAsync(x => x.Id == old.UserId && x.Status == UserStatus.Active, ct);
-        if (user is null) return Unauthorized();
-        var roles = await (from ur in db.UserRoles
-                           join r in db.Roles on ur.RoleId equals r.Id
-                           where ur.UserId == user.Id
-                           select r.Code).ToListAsync(ct);
-        var access = tokens.CreateAccessToken(user, roles);
-        var refresh = tokens.CreateRefreshToken();
-        var next = new RefreshToken
-        {
-            Id = Guid.CreateVersion7(),
-            UserId = user.Id,
-            TokenHash = refresh.Hash,
-            FamilyId = old.FamilyId,
-            ExpiresAt = refresh.ExpiresAt,
-            CreatedAt = DateTimeOffset.UtcNow
-        };
-        old.RevokedAt = DateTimeOffset.UtcNow;
-        old.ReplacedByTokenId = next.Id;
-        db.RefreshTokens.Add(next);
-        await db.SaveChangesAsync(ct);
-        Response.Headers["X-New-Access-Token"] = access.Token;
-        Response.Headers["X-Refresh-Token"] = refresh.RawToken;
-        Response.Headers["Cache-Control"] = "no-store";
-
-        return Ok();
-    }
-
     [Authorize, HttpPost("logout")]
     public async Task<IActionResult> Logout(CancellationToken ct)
     {
