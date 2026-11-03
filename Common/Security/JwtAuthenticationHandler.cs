@@ -30,7 +30,7 @@ public sealed class JwtAuthenticationHandler(
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        // 1. Lấy Access Token từ Authorization header.
+        //Lấy Access Token từ Authorization header.
         var authorization = Request.Headers.Authorization.ToString();
 
         if (string.IsNullOrWhiteSpace(authorization))
@@ -48,7 +48,7 @@ public sealed class JwtAuthenticationHandler(
         if (string.IsNullOrWhiteSpace(accessToken))
             return AuthenticateResult.Fail("Access Token không hợp lệ.");
 
-        // 2. Xác thực chữ ký, Issuer và Audience.
+        //Xác thực chữ ký, Issuer và Audience.
         // Tắt ValidateLifetime để tự xử lý Access Token hết hạn.
         var tokenHandler = new JwtSecurityTokenHandler
         {
@@ -101,11 +101,11 @@ public sealed class JwtAuthenticationHandler(
 
         var now = DateTimeOffset.UtcNow;
 
-        // 3. Kiểm tra thời điểm bắt đầu hiệu lực.
+        // Kiểm tra thời điểm bắt đầu hiệu lực.
         if (jwt.ValidFrom > now.UtcDateTime)
             return AuthenticateResult.Fail("Access Token chưa có hiệu lực.");
 
-        // 4. Lấy User ID và JTI từ JWT.
+        // Lấy User ID và JTI từ JWT.
         // Chỉ sử dụng để xác định tài khoản và token.
         var userIdValue = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
         var jtiValue = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
@@ -118,7 +118,7 @@ public sealed class JwtAuthenticationHandler(
             );
         }
 
-        // 5. Kiểm tra Access Token có bị thu hồi không.
+        // Kiểm tra Access Token có bị thu hồi không.
         var isRevoked = await db.RevokedTokens
             .AnyAsync(
                 x => x.Jti == jti,
@@ -128,7 +128,7 @@ public sealed class JwtAuthenticationHandler(
         if (isRevoked)
             return AuthenticateResult.Fail("Access Token đã bị thu hồi.");
 
-        // 6. Lấy thông tin User mới nhất từ database.
+        // Lấy thông tin User mới nhất từ database.
         var user = await db.Users
             .AsNoTracking()
             .SingleOrDefaultAsync(
@@ -139,7 +139,7 @@ public sealed class JwtAuthenticationHandler(
         if (user is null || user.Status != UserStatus.Active)
             return AuthenticateResult.Fail("Tài khoản không hoạt động.");
 
-        // 7. Lấy Role hiện tại từ database.
+        // Lấy Role hiện tại từ database.
         var roles = await (
             from userRole in db.UserRoles
             join role in db.Roles
@@ -148,7 +148,7 @@ public sealed class JwtAuthenticationHandler(
             select role.Code
         ).ToListAsync(Context.RequestAborted);
 
-        // 8. Kiểm tra thời hạn Access Token.
+        // Kiểm tra thời hạn Access Token.
         var accessTokenExpiresAt = new DateTimeOffset(jwt.ValidTo);
 
         // Trường hợp Access Token vẫn còn hiệu lực.
@@ -174,7 +174,7 @@ public sealed class JwtAuthenticationHandler(
             );
         }
 
-        // 9. Access Token đã hết hạn: kiểm tra Refresh Token.
+        // Access Token đã hết hạn: kiểm tra Refresh Token.
         var refreshToken = Request.Headers["X-Refresh-Token"]
             .ToString()
             .Trim();
@@ -192,20 +192,48 @@ public sealed class JwtAuthenticationHandler(
                 Context.RequestAborted
             );
 
-        if (storedRefreshToken is null ||
-            storedRefreshToken.RevokedAt is not null ||
-            storedRefreshToken.ExpiresAt <= now)
+        if (storedRefreshToken is null)
         {
             return AuthenticateResult.Fail(
-                "Refresh Token không hợp lệ hoặc đã hết hạn."
+                "Refresh Token không hợp lệ."
             );
         }
 
-        // 10. Tạo Access Token và Refresh Token mới.
+        if (storedRefreshToken.RevokedAt is not null)
+        {
+            // Token đã bị sử dụng lại.
+            // Thu hồi toàn bộ Refresh Token trong cùng Family.
+            await db.RefreshTokens
+                .Where(x =>
+                    x.UserId == userId &&
+                    x.FamilyId == storedRefreshToken.FamilyId &&
+                    x.RevokedAt == null)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(
+                            x => x.RevokedAt,
+                            now
+                        ),
+                    Context.RequestAborted
+                );
+
+            return AuthenticateResult.Fail(
+                "Phát hiện Refresh Token đã bị sử dụng lại."
+            );
+        }
+
+        if (storedRefreshToken.ExpiresAt <= now)
+        {
+            return AuthenticateResult.Fail(
+                "Refresh Token đã hết hạn."
+            );
+        }
+
+        // Tạo Access Token và Refresh Token mới.
         var newAccessToken = tokenService.CreateAccessToken(user, roles);
         var newRefreshToken = tokenService.CreateRefreshToken();
 
-        // 11. Thu hồi Refresh Token cũ và lưu Refresh Token mới.
+        // Thu hồi Refresh Token cũ và lưu Refresh Token mới.
         var nextRefreshToken = new RefreshToken
         {
             Id = Guid.CreateVersion7(),
@@ -223,12 +251,12 @@ public sealed class JwtAuthenticationHandler(
 
         await db.SaveChangesAsync(Context.RequestAborted);
 
-        // 12. Trả hai token mới qua Response Headers.
+        // Trả hai token mới qua Response Headers.
         Response.Headers["X-New-Access-Token"] = newAccessToken.Token;
         Response.Headers["X-Refresh-Token"] = newRefreshToken.RawToken;
         Response.Headers["Cache-Control"] = "no-store";
 
-        // 12. Tạo ClaimsPrincipal từ thông tin mới nhất trong database.
+        // Tạo ClaimsPrincipal từ thông tin mới nhất trong database.
         var newClaims = CreateUserClaims(
      user,
      roles,
