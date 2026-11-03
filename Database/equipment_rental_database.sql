@@ -3,27 +3,41 @@
 -- PostgreSQL
 -- Final schema - course project scope
 -- ============================================================
-
-
 CREATE DATABASE QL_ThietBiChoThue;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ============================================================
 -- 1. USERS / ROLES / STAFF / COMPANIES
 -- ============================================================
-
+CREATE TABLE storage_files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    object_key TEXT NOT NULL UNIQUE,
+    bucket_name VARCHAR(100) NOT NULL,
+    original_name VARCHAR(255) NOT NULL,
+    content_type VARCHAR(150),
+    size_bytes BIGINT NOT NULL
+        CHECK (size_bytes >= 0),
+    metadata JSONB,
+    uploaded_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(100) NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     full_name VARCHAR(150) NOT NULL,
+    avatar_storage_file_id UUID NULL,
     email VARCHAR(255),
     phone VARCHAR(20),
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
         CHECK (status IN ('ACTIVE', 'INACTIVE', 'LOCKED')),
     last_login_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_users_avatar_storage_file
+    FOREIGN KEY (avatar_storage_file_id)
+    REFERENCES storage_files(id)
+    ON DELETE SET NULL;
 );
 
 CREATE TABLE roles (
@@ -85,18 +99,7 @@ CREATE TABLE notifications (
 -- FILE STORAGE
 -- ============================================================
 
-CREATE TABLE storage_files (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    object_key TEXT NOT NULL UNIQUE,
-    bucket_name VARCHAR(100) NOT NULL,
-    original_name VARCHAR(255) NOT NULL,
-    content_type VARCHAR(150),
-    size_bytes BIGINT NOT NULL
-        CHECK (size_bytes >= 0),
-    metadata JSONB,
-    uploaded_by UUID REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+
 
 -- ============================================================
 -- 2. WAREHOUSE / CATEGORY / EQUIPMENT
@@ -979,17 +982,3 @@ CREATE TABLE revoked_tokens (
 
 CREATE INDEX idx_revoked_tokens_user_id ON revoked_tokens(user_id);
 CREATE INDEX idx_revoked_tokens_expires_at ON revoked_tokens(expires_at);
-
-
-CREATE TABLE upload_sessions (
-    id UUID PRIMARY KEY,
-    uploaded_by UUID NOT NULL,
-    folder VARCHAR(50) NOT NULL,
-    resource_type VARCHAR(20) NOT NULL,
-    max_file_size_bytes BIGINT NOT NULL,
-    allowed_extensions TEXT[] NOT NULL DEFAULT '{}',
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL
-);
-

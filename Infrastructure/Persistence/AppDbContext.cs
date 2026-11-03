@@ -81,9 +81,20 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.LastLoginAt).HasColumnType("timestamp with time zone");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
-            entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
+
             entity.HasIndex(x => x.Username).IsUnique();
-            entity.HasIndex(x => x.Username).IsUnique();
+
+            entity.Property(x => x.AvatarStorageFileId).HasColumnName("avatar_storage_file_id");
+
+            entity.HasIndex(x => x.AvatarStorageFileId);
+
+            entity.HasOne(x => x.AvatarStorageFile)
+                .WithMany()
+                .HasForeignKey(x => x.AvatarStorageFileId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+
+
 
         });
         modelBuilder.Entity<Role>(entity =>
