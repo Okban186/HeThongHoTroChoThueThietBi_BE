@@ -9,18 +9,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- ============================================================
 -- 1. USERS / ROLES / STAFF / COMPANIES
 -- ============================================================
-CREATE TABLE storage_files (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    object_key TEXT NOT NULL UNIQUE,
-    bucket_name VARCHAR(100) NOT NULL,
-    original_name VARCHAR(255) NOT NULL,
-    content_type VARCHAR(150),
-    size_bytes BIGINT NOT NULL
-        CHECK (size_bytes >= 0),
-    metadata JSONB,
-    uploaded_by UUID REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(100) NOT NULL UNIQUE,
@@ -33,12 +21,52 @@ CREATE TABLE users (
         CHECK (status IN ('ACTIVE', 'INACTIVE', 'LOCKED')),
     last_login_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fk_users_avatar_storage_file
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE storage_files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    object_key TEXT NOT NULL UNIQUE,
+    bucket_name VARCHAR(100) NOT NULL,
+    original_name VARCHAR(255) NOT NULL,
+    content_type VARCHAR(150),
+    size_bytes BIGINT NOT NULL
+        CHECK (size_bytes >= 0),
+    metadata JSONB,
+    uploaded_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Bổ sung khóa ngoại avatar sau khi bảng storage_files đã tồn tại
+ALTER TABLE users
+    ADD CONSTRAINT fk_users_avatar_storage_file
     FOREIGN KEY (avatar_storage_file_id)
     REFERENCES storage_files(id)
     ON DELETE SET NULL;
+
+CREATE TABLE user_devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    fcm_token TEXT NOT NULL,
+    device_id VARCHAR(255) NULL,
+    platform VARCHAR(20) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_user_devices_users
+        FOREIGN KEY (user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT uq_user_devices_fcm_token
+        UNIQUE (fcm_token)
 );
+
+CREATE INDEX idx_user_devices_user_id
+    ON user_devices(user_id);
+
+CREATE INDEX idx_user_devices_device_id
+    ON user_devices(device_id);
 
 CREATE TABLE roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -11,6 +11,7 @@ using HeThongHoTroChoThueThietBi.Features.Notification.Entities;
 using HeThongHoTroChoThueThietBi.Storage.Entities;
 using Microsoft.EntityFrameworkCore;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Entities;
+using HeThongHoTroChoThueThietBi.Features.Notifications;
 
 namespace HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 
@@ -65,6 +66,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<RevokedToken> RevokedTokens => Set<RevokedToken>();
 
     public DbSet<UploadSession> UploadSessions => Set<UploadSession>();
+
+    public DbSet<UserDevice> UserDevices => Set<UserDevice>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -783,6 +786,63 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 x.Status,
                 x.ExpiresAt
             });
+        });
+
+        modelBuilder.Entity<UserDevice>(entity =>
+        {
+            entity.ToTable("user_devices");
+
+            entity.HasKey(e => e.Id);
+
+            entity.Property(e => e.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()")
+                .ValueGeneratedOnAdd();
+
+            entity.Property(e => e.UserId)
+                .HasColumnName("user_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+
+            entity.Property(e => e.FcmToken)
+                .HasColumnName("fcm_token")
+                .HasColumnType("text")
+                .IsRequired();
+
+            entity.Property(e => e.DeviceId)
+                .HasColumnName("device_id")
+                .HasMaxLength(255);
+
+            entity.Property(e => e.Platform)
+                .HasColumnName("platform")
+                .HasMaxLength(20)
+                .IsRequired();
+
+            entity.Property(e => e.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamptz")
+                .HasDefaultValueSql("NOW()");
+
+            entity.Property(e => e.UpdatedAt)
+                .HasColumnName("updated_at")
+                .HasColumnType("timestamptz")
+                .HasDefaultValueSql("NOW()");
+
+            entity.HasIndex(e => e.FcmToken)
+                .IsUnique()
+                .HasDatabaseName("uq_user_devices_fcm_token");
+
+            entity.HasIndex(e => e.UserId)
+                .HasDatabaseName("idx_user_devices_user_id");
+
+            entity.HasIndex(e => e.DeviceId)
+                .HasDatabaseName("idx_user_devices_device_id");
+
+            entity.HasOne(e => e.User)
+                .WithMany()
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
