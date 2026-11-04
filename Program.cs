@@ -60,11 +60,15 @@ builder.Services.AddScoped<IFileUploadService, CloudinaryUploadService>();
 
 builder.Services.AddScoped<TokenService>();
 
+// Đặt là true nếu muốn dùng Neon, false nếu muốn dùng Local
+bool useNeon = builder.Configuration.GetValue<bool>("UseNeonCloud");
+
+var connectionString = useNeon
+    ? builder.Configuration.GetConnectionString("NeonDb")
+    : builder.Configuration.GetConnectionString("LocalDb");
+
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection")
-    )
-);
+    options.UseNpgsql(connectionString));
 
 //Dang ky global exception
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
