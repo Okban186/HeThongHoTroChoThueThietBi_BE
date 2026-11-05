@@ -29,12 +29,25 @@ CREATE TABLE storage_files (
     object_key TEXT NOT NULL UNIQUE,
     bucket_name VARCHAR(100) NOT NULL,
     original_name VARCHAR(255) NOT NULL,
+    resource_type VARCHAR(20) NOT NULL DEFAULT 'Image',
     content_type VARCHAR(150),
     size_bytes BIGINT NOT NULL
         CHECK (size_bytes >= 0),
     metadata JSONB,
     uploaded_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE upload_sessions (
+    id UUID PRIMARY KEY,
+    uploaded_by UUID NOT NULL,
+    folder VARCHAR(50) NOT NULL,
+    resource_type VARCHAR(20) NOT NULL,
+    max_file_size_bytes BIGINT NOT NULL,
+    allowed_extensions TEXT[] NOT NULL DEFAULT '{}',
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Bổ sung khóa ngoại avatar sau khi bảng storage_files đã tồn tại
