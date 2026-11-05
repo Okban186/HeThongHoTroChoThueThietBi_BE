@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
 
 namespace HeThongHoTroChoThueThietBi.Storage.Entities;
 
@@ -24,6 +25,10 @@ public class StorageFile
     [MaxLength(255)]
     [Required]
     public string OriginalName { get; set; } = null!;
+
+    [Column("resource_type")]
+    [Required]
+    public CloudinaryResourceType ResourceType { get; set; }
 
     [Column("content_type")]
     [MaxLength(150)]
