@@ -109,15 +109,31 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Description).HasColumnType("text");
             entity.HasIndex(x => x.Code).IsUnique();
         });
-        modelBuilder.Entity<UserRole>(entity =>
-        {
-            entity.HasKey(x => new { x.UserId, x.RoleId });
-            entity.Property(x => x.UserId).IsRequired();
-            entity.Property(x => x.RoleId).IsRequired();
-            entity.Property(x => x.AssignedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
-            entity.HasOne<User>().WithMany().HasForeignKey(x => x.UserId);
-            entity.HasOne<Role>().WithMany().HasForeignKey(x => x.RoleId);
-        });
+        modelBuilder.Entity<User>()
+      .HasMany(u => u.Roles)
+      .WithMany()
+      .UsingEntity<UserRole>(
+          right => right
+              .HasOne<Role>()
+              .WithMany()
+              .HasForeignKey(x => x.RoleId),
+
+          left => left
+              .HasOne<User>()
+              .WithMany()
+              .HasForeignKey(x => x.UserId),
+
+          join =>
+          {
+              join.ToTable("user_roles");
+
+              join.HasKey(x => new { x.UserId, x.RoleId });
+
+              join.Property(x => x.AssignedAt)
+                  .HasColumnType("timestamp with time zone")
+                  .HasDefaultValueSql("NOW()")
+                  .IsRequired();
+          });
         modelBuilder.Entity<Staff>(entity =>
         {
             entity.HasKey(x => x.Id);
@@ -131,7 +147,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => x.UserId).IsUnique();
             entity.HasIndex(x => x.EmployeeCode).IsUnique();
-            entity.HasOne<User>().WithMany().HasForeignKey(x => x.UserId);
+            entity.HasOne<User>().WithOne(u => u.Staff).HasForeignKey<Staff>(s => s.UserId);
         });
         modelBuilder.Entity<Company>(entity =>
         {
@@ -178,6 +194,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.OriginalName).HasColumnType("varchar(255)").IsRequired();
             entity.Property(x => x.ContentType).HasColumnType("varchar(150)");
             entity.Property(x => x.SizeBytes).IsRequired();
+            entity.Property(x => x.ResourceType)
+            .HasColumnName("resource_type")
+            .HasConversion<string>()
+            .HasMaxLength(20)
+            .IsRequired();
             entity.Property(x => x.Metadata).HasColumnType("jsonb");
             entity.Property(x => x.UploadedBy);
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
