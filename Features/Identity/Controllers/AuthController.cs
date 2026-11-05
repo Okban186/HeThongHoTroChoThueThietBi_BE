@@ -8,12 +8,15 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using HeThongHoTroChoThueThietBi.Features.Identity.Enums;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
+using HeThongHoTroChoThueThietBi.Storage.Entities;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 
 namespace HeThongHoTroChoThueThietBi.Features.Identity.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public sealed class AuthController(AppDbContext db, TokenService tokens) : ControllerBase
+public sealed class AuthController(AppDbContext db, IFileUploadService uploadService, TokenService tokens) : ControllerBase
 {
     [AllowAnonymous, HttpPost("login")]
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken ct)
@@ -44,17 +47,7 @@ public sealed class AuthController(AppDbContext db, TokenService tokens) : Contr
         Response.Headers["X-Refresh-Token"] = refresh.RawToken;
         Response.Headers["Cache-Control"] = "no-store";
 
-        return Ok(new
-        {
-
-            user = new
-            {
-                user.Id,
-                user.Username,
-                user.FullName,
-                roles
-            }
-        });
+        return Ok();
     }
 
     [Authorize, HttpPost("logout")]
@@ -107,16 +100,42 @@ public sealed class AuthController(AppDbContext db, TokenService tokens) : Contr
     }
 
     [Authorize]
-    [HttpGet("test")]
-    public IActionResult TestAuth()
+    [HttpGet("me")]
+    public async Task<IActionResult> GetMyProfile(CancellationToken cancellationToken)
     {
-        return Ok(new
-        {
-            message = "Authentication thành công!",
-            userId = User.FindFirstValue(ClaimTypes.NameIdentifier),
-            username = User.Identity?.Name,
-            roles = User.FindAll(ClaimTypes.Role)
-                         .Select(x => x.Value)
-        });
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub"));
+
+        var user = await db.Users
+         .Include(u => u.Staff)
+         .Include(u => u.AvatarStorageFile)
+         .Include(u => u.Roles)
+         .AsNoTracking()
+         .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user == null) return NotFound();
+
+        StorageFile? storageFile = user.AvatarStorageFile;
+
+        // Mapping nhanh gọn bằng C# Expression
+        var response = new UserProfileResponse(
+            user.Id,
+            user.Username,
+            user.FullName,
+            user.Email,
+            user.Phone,
+            user.Status.ToString(),
+            user.Roles.Select(r => r.Name).ToList(),
+            user.AvatarStorageFileId,
+            storageFile != null ? uploadService.GetPrivateImageUrl($"{storageFile.BucketName}/{storageFile.ObjectKey}", CloudinaryMappingExtensions.ToCloudinaryNetResourceType(storageFile.ResourceType), storageFile.ContentType!) : null,
+            user.Staff == null ? null : new StaffDto(
+                user.Staff.Id,
+                user.Staff.UserId,
+                user.Staff.EmployeeCode,
+                user.Staff.Position,
+                user.Staff.HireDate,
+                user.Staff.Status.ToString()
+            )
+        );
+
+        return Ok(response);
     }
 }
