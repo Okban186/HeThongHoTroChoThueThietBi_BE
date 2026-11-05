@@ -5,7 +5,7 @@ public record UserProfileResponse(
     string? Email,
     string? Phone,
     string? Status,
-    List<string> Roles,
+    List<RoleDto> Roles,
     Guid? AvatarStorageFileId,
     string? AvatarUrl,
     StaffDto? Staff
@@ -18,4 +18,12 @@ public record StaffDto(
     string? Position,
     DateOnly? HireDate,
     string? Status
+);
+
+public record RoleDto(
+    Guid Id,
+    string Code,
+
+    string Name,
+    string Description
 );

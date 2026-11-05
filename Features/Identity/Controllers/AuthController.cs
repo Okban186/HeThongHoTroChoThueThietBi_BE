@@ -123,7 +123,12 @@ public sealed class AuthController(AppDbContext db, IFileUploadService uploadSer
             user.Email,
             user.Phone,
             user.Status.ToString(),
-            user.Roles.Select(r => r.Name).ToList(),
+            user.Roles.Select(r => new RoleDto(
+                r.Id,
+                r.Code,
+                 r.Name,
+                  r.Description
+            )).ToList(),
             user.AvatarStorageFileId,
             storageFile != null ? uploadService.GetPrivateImageUrl($"{storageFile.BucketName}/{storageFile.ObjectKey}", CloudinaryMappingExtensions.ToCloudinaryNetResourceType(storageFile.ResourceType), storageFile.ContentType!) : null,
             user.Staff == null ? null : new StaffDto(
