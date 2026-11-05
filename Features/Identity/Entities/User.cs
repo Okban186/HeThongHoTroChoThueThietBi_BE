@@ -1,4 +1,5 @@
 using HeThongHoTroChoThueThietBi.Features.Identity.Enums;
+using HeThongHoTroChoThueThietBi.Features.Organization.Entities;
 using HeThongHoTroChoThueThietBi.Storage.Entities;
 using System;
 using System.ComponentModel.DataAnnotations;
@@ -41,6 +42,10 @@ public class User
     public UserStatus Status { get; set; }
 
     public Guid? AvatarStorageFileId { get; set; }
+
+    public virtual Staff? Staff { get; set; }
+
+    public virtual ICollection<Role> Roles { get; set; } = new List<Role>();
 
     public StorageFile? AvatarStorageFile { get; set; }
 
