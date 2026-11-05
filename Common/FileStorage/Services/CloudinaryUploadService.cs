@@ -6,6 +6,7 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Configurations;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Entities;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
 using HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 using HeThongHoTroChoThueThietBi.Storage.Entities;
@@ -77,7 +78,8 @@ public class CloudinaryUploadService : IFileUploadService
                 ["folder"] = "temp",
                 ["overwrite"] = "false",
                 ["public_id"] = publicId,
-                ["timestamp"] = timestamp
+                ["timestamp"] = timestamp,
+                ["type"] = "authenticated"
 
             };
 
@@ -159,7 +161,7 @@ public class CloudinaryUploadService : IFileUploadService
 
         var folder = session.Folder.ToFolderName();
         var objectKey = session.Id.ToString("N");
-        var resourceType = ConvertResourceType(session.ResourceType);
+        var resourceType = CloudinaryMappingExtensions.ToCloudinaryNetResourceType(session.ResourceType);
 
         var existingFile = await _dbContext.StorageFiles.FirstOrDefaultAsync(
             x => x.BucketName == folder && x.ObjectKey == objectKey,
@@ -255,6 +257,7 @@ public class CloudinaryUploadService : IFileUploadService
                 new RenameParams(currentPublicId, finalPublicId)
                 {
                     ResourceType = resourceType,
+                    Type = "authenticated",
                     Overwrite = false
                 },
                 cancellationToken);
@@ -286,7 +289,7 @@ public class CloudinaryUploadService : IFileUploadService
             new ExplicitParams(currentPublicId)
             {
                 ResourceType = resourceType,
-                Type = "upload",
+                Type = "authenticated",
                 AssetFolder = folder
             },
             cancellationToken);
@@ -322,6 +325,8 @@ public class CloudinaryUploadService : IFileUploadService
             Id = Guid.CreateVersion7(),
             ObjectKey = objectKey,
             BucketName = folder,
+            ContentType = resource.Format,
+            ResourceType = session.ResourceType,
             OriginalName = originalName,
             SizeBytes = resource.Bytes,
             UploadedBy = uploadedBy,
@@ -343,20 +348,10 @@ public class CloudinaryUploadService : IFileUploadService
         return _cloudinary.GetResourceAsync(
             new GetResourceParams(publicId)
             {
-                ResourceType = resourceType
+                ResourceType = resourceType,
+                Type = "authenticated"
             },
             cancellationToken);
-    }
-
-    private static ResourceType ConvertResourceType(CloudinaryResourceType resourceType)
-    {
-        return resourceType switch
-        {
-            CloudinaryResourceType.Image => ResourceType.Image,
-            CloudinaryResourceType.Video => ResourceType.Video,
-            CloudinaryResourceType.Raw => ResourceType.Raw,
-            _ => throw new InvalidOperationException("Cloudinary resource type không hợp lệ.")
-        };
     }
 
     private static ConfirmFileUploadResult Succeeded(Guid sessionId, Guid storageFileId)
@@ -379,5 +374,23 @@ public class CloudinaryUploadService : IFileUploadService
             ErrorCode = errorCode,
             Message = message
         };
+    }
+
+    public string GetPrivateImageUrl(string publicId, ResourceType resourceType, string format, TimeSpan? expiration = null)
+    {
+        var expireTime = expiration ?? TimeSpan.FromHours(1);
+
+        long expiresAtUnix = DateTimeOffset.UtcNow
+            .Add(expireTime)
+            .ToUnixTimeSeconds();
+
+        return _cloudinary.DownloadPrivate(
+            publicId,
+            attachment: false,
+            format: format,
+            type: "authenticated",
+            expiresAt: expiresAtUnix,
+            resourceType: resourceType.ToString().ToLower()
+        );
     }
 }
