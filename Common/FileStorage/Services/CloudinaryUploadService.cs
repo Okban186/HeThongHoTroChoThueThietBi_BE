@@ -106,6 +106,10 @@ public class CloudinaryUploadService : IFileUploadService
             uploads.Add(new CloudinaryUploadItem
             {
                 SessionId = sessionId,
+                AllowedFormats = [.. policy.AllowedExtensions],
+                OverWrite = "false",
+                Folder = "temp",
+                Type = "authenticated",
                 UploadUrl = uploadUrl,
                 PublicId = publicId,
                 Timestamp = timestamp,

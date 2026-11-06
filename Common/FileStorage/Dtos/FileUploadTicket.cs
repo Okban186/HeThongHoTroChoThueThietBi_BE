@@ -22,10 +22,18 @@ public sealed class CloudinaryUploadItem
     public Guid SessionId { get; set; }
     public string UploadUrl { get; set; } = string.Empty;
 
+    public List<string> AllowedFormats { get; set; } = [];
+
+    public string Folder { get; set; } = string.Empty;
+
+    public string OverWrite { get; set; } = "false";
+
     // public_id đầy đủ trên Cloudinary
     public string PublicId { get; set; } = string.Empty;
 
     public long Timestamp { get; set; }
 
     public string Signature { get; set; } = string.Empty;
+
+    public string Type { get; set; } = "authenticated";
 }
