@@ -11,6 +11,7 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Configurations;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Services;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
+using HeThongHoTroChoThueThietBi.Features.Organization.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -60,6 +61,10 @@ builder.Services.AddSingleton<Cloudinary>(serviceProvider =>
 builder.Services.AddScoped<IFileUploadService, CloudinaryUploadService>();
 
 builder.Services.AddScoped<TokenService>();
+builder.Services.AddScoped<UserManagementService>();
+
+// Organization
+builder.Services.AddScoped<CompanyService>();
 
 // Equipment
 builder.Services.AddScoped<EquipmentAvailabilityService>();
