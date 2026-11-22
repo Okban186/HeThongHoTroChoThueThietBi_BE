@@ -162,6 +162,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => x.CompanyCode).IsUnique();
             entity.HasIndex(x => x.TaxCode).IsUnique();
+            entity.HasIndex(x => x.CreatedBy);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.CreatedBy);
         });
         modelBuilder.Entity<CompanyUser>(entity =>
         {
@@ -299,6 +301,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.CompanyId).IsRequired();
             entity.Property(x => x.RequestedFrom).IsRequired();
             entity.Property(x => x.RequestedTo).IsRequired();
+            entity.Property(x => x.ContactName).HasColumnType("varchar(150)").IsRequired();
+            entity.Property(x => x.ContactPhone).HasColumnType("varchar(20)").IsRequired();
+            entity.Property(x => x.ExpiresAt).HasColumnType("timestamp with time zone").IsRequired();
             entity.Property(x => x.Note).HasColumnType("text");
             entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'PENDING'").IsRequired();
             entity.Property(x => x.CreatedBy).IsRequired();

@@ -26,6 +26,20 @@ public class Reservation
     [Column("requested_to")]
     public DateOnly RequestedTo { get; set; }
 
+    [Column("contact_name")]
+    [MaxLength(150)]
+    [Required]
+    public string ContactName { get; set; } = null!;
+
+    [Column("contact_phone")]
+    [MaxLength(20)]
+    [Required]
+    public string ContactPhone { get; set; } = null!;
+
+    // Hạn giữ chỗ; quá hạn mà chưa tạo hợp đồng thì chuyển sang EXPIRED.
+    [Column("expires_at", TypeName = "timestamp with time zone")]
+    public DateTimeOffset ExpiresAt { get; set; }
+
     [Column("note")]
     public string? Note { get; set; }
 
