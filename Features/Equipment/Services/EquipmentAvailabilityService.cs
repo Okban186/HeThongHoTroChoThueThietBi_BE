@@ -43,6 +43,35 @@ public sealed class EquipmentAvailabilityService(AppDbContext db)
     public static DateOnly BusinessToday()
         => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(BusinessUtcOffset).DateTime);
 
+    /// <summary>Thời điểm 00:00 (giờ Việt Nam) của một ngày nghiệp vụ.</summary>
+    public static DateTimeOffset StartOfBusinessDay(DateOnly date)
+        => new(date.ToDateTime(TimeOnly.MinValue), BusinessUtcOffset);
+
+    /// <summary>
+    /// Khóa (SELECT ... FOR UPDATE) các dòng equipment_models trong transaction hiện tại.
+    ///
+    /// Gọi trước khi kiểm tra khả dụng rồi lưu phiếu/hợp đồng, để hai thao tác giữ chỗ
+    /// cùng model chạy tuần tự, không thể cùng lúc vượt quá số máy.
+    /// Bắt buộc gọi bên trong transaction (db.Database.BeginTransactionAsync).
+    /// </summary>
+    public async Task LockModelsAsync(
+        IReadOnlyCollection<Guid> equipmentModelIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (db.Database.CurrentTransaction is null)
+            throw new InvalidOperationException("LockModelsAsync phải được gọi trong transaction.");
+
+        // Sắp xếp để mọi transaction khóa theo cùng thứ tự, tránh deadlock.
+        var ids = equipmentModelIds.Distinct().Order().ToArray();
+
+        if (ids.Length == 0)
+            return;
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM equipment_models WHERE id = ANY({ids}) ORDER BY id FOR UPDATE",
+            cancellationToken);
+    }
+
     public async Task<EquipmentAvailabilityResult> GetAvailabilityAsync(
         Guid equipmentModelId,
         DateOnly from,
