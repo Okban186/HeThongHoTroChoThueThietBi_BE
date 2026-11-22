@@ -10,8 +10,11 @@ using Microsoft.Extensions.Options;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Configurations;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Services;
+using HeThongHoTroChoThueThietBi.Features.Dashboard.Services;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
 using HeThongHoTroChoThueThietBi.Features.Organization.Services;
+using HeThongHoTroChoThueThietBi.Features.Rental.Configurations;
+using HeThongHoTroChoThueThietBi.Features.Rental.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -65,6 +68,16 @@ builder.Services.AddScoped<UserManagementService>();
 
 // Organization
 builder.Services.AddScoped<CompanyService>();
+
+// Rental
+builder.Services.Configure<ReservationOptions>(
+    builder.Configuration.GetSection(ReservationOptions.SectionName)
+);
+builder.Services.AddScoped<ReservationService>();
+builder.Services.AddScoped<ContractService>();
+
+// Dashboard
+builder.Services.AddScoped<DashboardService>();
 
 // Equipment
 builder.Services.AddScoped<EquipmentAvailabilityService>();
