@@ -129,6 +129,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
               join.HasKey(x => new { x.UserId, x.RoleId });
 
+              // Khớp schema: assigned_at DEFAULT NOW() khi gán role qua user.Roles.Add(...)
+              join.Property(x => x.AssignedAt).HasDefaultValueSql("NOW()");
+
               join.Property(x => x.AssignedAt)
                   .HasColumnType("timestamp with time zone")
                   .HasDefaultValueSql("NOW()")

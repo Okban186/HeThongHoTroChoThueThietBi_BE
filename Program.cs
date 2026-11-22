@@ -60,6 +60,7 @@ builder.Services.AddSingleton<Cloudinary>(serviceProvider =>
 builder.Services.AddScoped<IFileUploadService, CloudinaryUploadService>();
 
 builder.Services.AddScoped<TokenService>();
+builder.Services.AddScoped<UserManagementService>();
 
 // Equipment
 builder.Services.AddScoped<EquipmentAvailabilityService>();
