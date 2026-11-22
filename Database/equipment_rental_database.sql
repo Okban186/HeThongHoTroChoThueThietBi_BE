@@ -115,6 +115,8 @@ CREATE TABLE companies (
     address TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
         CHECK (status IN ('ACTIVE', 'INACTIVE')),
+    -- Nhân viên kinh doanh tạo công ty (NULL với dữ liệu cũ).
+    created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -243,6 +245,11 @@ CREATE TABLE reservations (
     company_id UUID NOT NULL REFERENCES companies(id),
     requested_from DATE NOT NULL,
     requested_to DATE NOT NULL,
+    contact_name VARCHAR(150) NOT NULL,
+    contact_phone VARCHAR(20) NOT NULL,
+    -- Hạn giữ chỗ: min(thời điểm tạo + số ngày cấu hình, requested_from).
+    -- Quá hạn mà chưa tạo hợp đồng thì chuyển sang EXPIRED.
+    expires_at TIMESTAMPTZ NOT NULL,
     note TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'PENDING'
         CHECK (status IN (
@@ -834,6 +841,9 @@ CREATE INDEX idx_staff_user_id
 
 CREATE INDEX idx_company_users_company_id
     ON company_users(company_id);
+
+CREATE INDEX idx_companies_created_by
+    ON companies(created_by);
 
 CREATE INDEX idx_notifications_user_id
     ON notifications(user_id);

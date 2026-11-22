@@ -35,6 +35,10 @@ public class Company
     [Required]
     public CompanyStatus Status { get; set; }
 
+    // Nhân viên kinh doanh tạo công ty; NULL với dữ liệu cũ.
+    [Column("created_by")]
+    public Guid? CreatedBy { get; set; }
+
     [Column("created_at", TypeName = "timestamp with time zone")]
     public DateTimeOffset CreatedAt { get; set; }
 
