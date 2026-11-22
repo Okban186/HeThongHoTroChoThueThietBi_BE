@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Configurations;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Services;
+using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -59,6 +60,10 @@ builder.Services.AddSingleton<Cloudinary>(serviceProvider =>
 builder.Services.AddScoped<IFileUploadService, CloudinaryUploadService>();
 
 builder.Services.AddScoped<TokenService>();
+
+// Equipment
+builder.Services.AddScoped<EquipmentAvailabilityService>();
+builder.Services.AddScoped<EquipmentModelService>();
 
 // Đặt là true nếu muốn dùng Neon, false nếu muốn dùng Local
 bool useNeon = builder.Configuration.GetValue<bool>("UseNeonCloud");
