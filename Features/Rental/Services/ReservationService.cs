@@ -369,10 +369,12 @@ public sealed class ReservationService(
 
     private DateTimeOffset CalculateExpiresAt(DateTimeOffset createdAt, DateOnly requestedFrom)
     {
-        var holdUntil = createdAt.AddDays(_options.HoldDays);
-        var endOfStartDay = EquipmentAvailabilityService.StartOfBusinessDay(requestedFrom.AddDays(1));
+        var holdUntil = createdAt.AddDays(_options.HoldDays).ToUniversalTime();
+        var endOfStartDay = EquipmentAvailabilityService
+            .StartOfBusinessDay(requestedFrom.AddDays(1))
+            .ToUniversalTime();
 
-        return Min(holdUntil, endOfStartDay);
+        return holdUntil <= endOfStartDay ? holdUntil : endOfStartDay;
     }
 
     private static DateTimeOffset Min(DateTimeOffset a, DateTimeOffset b) => a <= b ? a : b;
