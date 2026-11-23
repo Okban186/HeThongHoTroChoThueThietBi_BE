@@ -24,7 +24,7 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 ///   Sales tạo từ phiếu APPROVED → DRAFT (phiếu chuyển CONVERTED)
 ///   Sales gửi duyệt            → PENDING_APPROVAL
 ///   Manager duyệt / từ chối    → PENDING_SIGNATURE / REJECTED (Sales sửa rồi gửi lại)
-///   Sales tải bản đã ký        → SIGNED
+///   Sales xuất PDF từ mẫu, hai bên ký, Sales tải bản PDF đã ký → SIGNED
 ///   Sales hủy (trước khi ký)   → CANCELLED
 ///
 /// Quy tắc:
@@ -35,13 +35,15 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 ///   là người được ủy quyền. File phải do chính Sales upload và chưa dùng cho hợp đồng khác.
 ///   (Schema chỉ có ID_CARD/AUTHORIZATION_LETTER/OTHER: mặt trước/sau phân biệt bằng display_order,
 ///   giấy phép kinh doanh là OTHER kèm ghi chú.)
-/// - Chỉ người tạo được sửa/gửi duyệt/tải bản ký/hủy; chỉ Manager duyệt/từ chối.
+/// - Sales chỉ thấy hợp đồng do mình tạo; chỉ người tạo được sửa/gửi duyệt/tải bản ký/hủy.
+///   Manager xem tất cả và duyệt/từ chối.
 /// - Mỗi lần đổi trạng thái ghi contract_status_history.
 /// </summary>
 public sealed class ContractService(
     AppDbContext db,
     EquipmentAvailabilityService availabilityService,
-    IFileUploadService uploadService)
+    IFileUploadService uploadService,
+    ContractPdfGenerator pdfGenerator)
 {
     private const string CodePrefix = "HD";
     private const int LongTermThresholdDays = 30;
@@ -57,6 +59,21 @@ public sealed class ContractService(
         Folder = StorageFolder.Contract,
     };
 
+    // Bản hợp đồng đã ký: chỉ nhận 1 file PDF. Cloudinary xếp PDF vào loại "image" nên
+    // allowed_formats được Cloudinary kiểm tra thật (loại "raw" thì không kiểm tra định dạng).
+    private static readonly FileUploadPolicy SignedContractUploadPolicy = new()
+    {
+        MaxFileCount = 1,
+        MaxFileSizeBytes = 10 * 1024 * 1024,
+        AllowedExtensions = [".pdf"],
+        ResourceType = CloudinaryResourceType.Image,
+        Folder = StorageFolder.Contract,
+    };
+
+    // storage_files.content_type lưu định dạng Cloudinary trả về (jpg, png, pdf, ...).
+    private static readonly string[] DocumentFormats = ["jpg", "jpeg", "png", "webp"];
+    private static readonly string[] SignedContractFormats = ["pdf"];
+
     private static readonly string[] RentalTypes = ["SHORT_TERM", "LONG_TERM"];
     private static readonly string[] BillingUnits = ["DAILY", "MONTHLY"];
     private static readonly string[] ServiceTypes = ["DELIVERY", "LOADING", "UNLOADING", "OTHER"];
@@ -68,8 +85,8 @@ public sealed class ContractService(
     public async Task<List<RentalContractResponse>> GetContractsAsync(
         string? keyword,
         string? status,
-        bool onlyMine,
         Guid currentUserId,
+        bool canViewAll,
         CancellationToken cancellationToken = default)
     {
         var query =
@@ -93,7 +110,7 @@ public sealed class ContractService(
             query = query.Where(x => x.contract.Status == contractStatus);
         }
 
-        if (onlyMine)
+        if (!canViewAll)
             query = query.Where(x => x.contract.CreatedBy == currentUserId);
 
         var contracts = await query
@@ -102,6 +119,83 @@ public sealed class ContractService(
             .ToListAsync(cancellationToken);
 
         return await ToResponsesAsync(contracts, currentUserId, cancellationToken);
+    }
+
+    /// <summary>Chi tiết theo quyền người xem: Sales mở hợp đồng của người khác nhận 404.</summary>
+    public async Task<RentalContractDetailResponse> GetDetailForViewerAsync(
+        Guid id,
+        Guid currentUserId,
+        bool canViewAll,
+        CancellationToken cancellationToken = default)
+    {
+        if (!canViewAll)
+        {
+            var contract = await FindAsync(id, tracking: false, cancellationToken);
+
+            if (contract.CreatedBy != currentUserId)
+                throw NotFound();
+        }
+
+        return await GetDetailAsync(id, currentUserId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Xuất hợp đồng PDF từ mẫu để in và ký. Hợp đồng chưa được duyệt vẫn xuất được để xem trước
+    /// nhưng có dòng "BẢN NHÁP"; hợp đồng đã hủy thì không xuất.
+    /// </summary>
+    public async Task<(string FileName, byte[] Content)> ExportPdfAsync(
+        Guid id,
+        Guid currentUserId,
+        bool canViewAll,
+        CancellationToken cancellationToken = default)
+    {
+        var detail = await GetDetailForViewerAsync(id, currentUserId, canViewAll, cancellationToken);
+        var contract = detail.Contract;
+
+        if (contract.Status == EnumName.ToDatabaseValue(RentalContractStatus.Cancelled))
+        {
+            throw new AppException(
+                "CONTRACT_CANCELLED",
+                "Hợp đồng đã hủy, không thể xuất PDF.",
+                StatusCodes.Status409Conflict);
+        }
+
+        var company = await db.Companies
+            .AsNoTracking()
+            .Where(c => c.Id == contract.CompanyId)
+            .Select(c => new { c.TaxCode, c.Address })
+            .SingleAsync(cancellationToken);
+
+        var notApprovedYet = new[]
+        {
+            RentalContractStatus.Draft,
+            RentalContractStatus.PendingApproval,
+            RentalContractStatus.Rejected,
+        }.Select(EnumName.ToDatabaseValue).Contains(contract.Status);
+
+        var vietnamToday = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7));
+
+        var content = pdfGenerator.Generate(new ContractPdfData(
+            contract.ContractCode,
+            notApprovedYet,
+            vietnamToday,
+            contract.StartDate,
+            contract.EndDate,
+            RentalDays(contract.StartDate, contract.EndDate),
+            contract.RentalType,
+            detail.DeliveryAddress,
+            detail.DeliveryNote,
+            detail.Note,
+            contract.CompanyName,
+            company.TaxCode,
+            company.Address,
+            detail.Representative,
+            detail.Items,
+            detail.Services,
+            contract.ContractTotalAmount,
+            contract.DepositRequiredAmount));
+
+        return ($"{contract.ContractCode}.pdf", content);
     }
 
     public async Task<RentalContractDetailResponse> GetDetailAsync(
@@ -272,6 +366,16 @@ public sealed class ContractService(
         CancellationToken cancellationToken = default)
         => uploadService.CreateUploadTicketAsync(DocumentUploadPolicy, request, currentUserId, cancellationToken);
 
+    /// <summary>Vé upload bản hợp đồng đã ký (1 file PDF, tối đa 10 MB).</summary>
+    public Task<FileUploadTicket> CreateSignedUploadTicketAsync(
+        Guid currentUserId,
+        CancellationToken cancellationToken = default)
+        => uploadService.CreateUploadTicketAsync(
+            SignedContractUploadPolicy,
+            new FileUploadRequest { FileCount = 1 },
+            currentUserId,
+            cancellationToken);
+
     public Task<ConfirmFileUploadResponse> ConfirmUploadAsync(
         ConfirmFileUploadRequest request,
         Guid currentUserId,
@@ -434,7 +538,8 @@ public sealed class ContractService(
         EnsureOwner(contract, currentUserId);
         EnsureStatus(contract, RentalContractStatus.PendingSignature);
 
-        await EnsureFilesUsableAsync([request.ContractFileId!.Value], currentUserId, contract.Id, cancellationToken);
+        await EnsureFilesUsableAsync(
+            [request.ContractFileId!.Value], SignedContractFormats, currentUserId, contract.Id, cancellationToken);
 
         var now = DateTimeOffset.UtcNow;
         contract.ContractFileId = request.ContractFileId;
@@ -535,7 +640,7 @@ public sealed class ContractService(
                 "documents");
         }
 
-        await EnsureFilesUsableAsync(fileIds, currentUserId, contract.Id, cancellationToken);
+        await EnsureFilesUsableAsync(fileIds, DocumentFormats, currentUserId, contract.Id, cancellationToken);
 
         var days = RentalDays(contract.StartDate, contract.EndDate);
 
@@ -671,25 +776,46 @@ public sealed class ContractService(
     }
 
     /// <summary>File phải do chính người dùng upload và chưa thuộc hợp đồng khác.</summary>
+    /// <summary>
+    /// File phải do chính Sales upload, đúng định dạng (ảnh cho giấy tờ, PDF cho bản đã ký)
+    /// và chưa gắn với hợp đồng khác.
+    /// </summary>
     private async Task EnsureFilesUsableAsync(
         List<Guid> fileIds,
+        string[] allowedFormats,
         Guid currentUserId,
         Guid contractId,
         CancellationToken cancellationToken)
     {
+        var isSignedContract = allowedFormats == SignedContractFormats;
+        var field = isSignedContract ? "contractFileId" : "documents";
+
         var files = await db.StorageFiles
             .AsNoTracking()
             .Where(f => fileIds.Contains(f.Id))
-            .Select(f => new { f.Id, f.UploadedBy })
+            .Select(f => new { f.Id, f.UploadedBy, f.ContentType })
             .ToListAsync(cancellationToken);
 
         if (files.Count != fileIds.Distinct().Count() || files.Any(f => f.UploadedBy != currentUserId))
         {
             throw new AppException(
                 "DOCUMENT_FILE_INVALID",
-                "Ảnh giấy tờ không hợp lệ hoặc không phải do bạn tải lên.",
+                isSignedContract
+                    ? "File hợp đồng đã ký không hợp lệ hoặc không phải do bạn tải lên."
+                    : "Ảnh giấy tờ không hợp lệ hoặc không phải do bạn tải lên.",
                 StatusCodes.Status400BadRequest,
-                "documents");
+                field);
+        }
+
+        if (files.Any(f => !allowedFormats.Contains((f.ContentType ?? "").ToLowerInvariant())))
+        {
+            throw new AppException(
+                "DOCUMENT_FILE_FORMAT_INVALID",
+                isSignedContract
+                    ? "Bản hợp đồng đã ký phải là file PDF."
+                    : "Giấy tờ phải là ảnh (jpg, png, webp).",
+                StatusCodes.Status400BadRequest,
+                field);
         }
 
         var usedElsewhere =
@@ -702,9 +828,9 @@ public sealed class ContractService(
         {
             throw new AppException(
                 "DOCUMENT_FILE_IN_USE",
-                "Ảnh giấy tờ đã được dùng cho hợp đồng khác.",
+                "File đã được dùng cho hợp đồng khác.",
                 StatusCodes.Status409Conflict,
-                "documents");
+                field);
         }
     }
 
@@ -750,8 +876,11 @@ public sealed class ContractService(
         var query = tracking ? db.RentalContracts : db.RentalContracts.AsNoTracking();
 
         return await query.SingleOrDefaultAsync(c => c.Id == id, cancellationToken)
-               ?? throw new AppException("CONTRACT_NOT_FOUND", "Không tìm thấy hợp đồng.", StatusCodes.Status404NotFound);
+               ?? throw NotFound();
     }
+
+    private static AppException NotFound()
+        => new("CONTRACT_NOT_FOUND", "Không tìm thấy hợp đồng.", StatusCodes.Status404NotFound);
 
     private static void EnsureOwner(RentalContract contract, Guid currentUserId)
     {

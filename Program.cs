@@ -75,6 +75,13 @@ builder.Services.Configure<ReservationOptions>(
 );
 builder.Services.AddScoped<ReservationService>();
 builder.Services.AddScoped<ContractService>();
+builder.Services.Configure<LessorOptions>(
+    builder.Configuration.GetSection(LessorOptions.SectionName)
+);
+builder.Services.AddSingleton<ContractPdfGenerator>();
+
+// QuestPDF (xuất hợp đồng PDF): giấy phép Community miễn phí cho dự án doanh thu dưới 1 triệu USD/năm.
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 // Dashboard
 builder.Services.AddScoped<DashboardService>();

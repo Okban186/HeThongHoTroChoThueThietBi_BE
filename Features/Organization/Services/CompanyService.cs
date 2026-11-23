@@ -14,8 +14,8 @@ namespace HeThongHoTroChoThueThietBi.Features.Organization.Services;
 /// Công ty khách hàng do nhân viên kinh doanh quản lý.
 ///
 /// Quy tắc:
-/// - Sales xem được mọi công ty; chỉ người tạo (companies.created_by) được sửa,
-///   đổi trạng thái và tạo tài khoản. Công ty chưa có người tạo (dữ liệu cũ) thì Sales nào cũng sửa được.
+/// - Công ty là dữ liệu dùng chung: Sales nào cũng xem, sửa, đổi trạng thái và tạo tài khoản được.
+///   companies.created_by chỉ ghi lại ai đã tạo để biết trách nhiệm, không phải "khách của riêng ai".
 /// - Mã công ty tự sinh: COMP-NNNN. Mã số thuế không trùng.
 /// - Tài khoản đăng nhập của khách hàng có role COMPANY, liên kết qua company_users.
 ///   Một công ty có thể có nhiều tài khoản; chỉ tạo được khi công ty đang hoạt động.
@@ -28,8 +28,6 @@ public sealed class CompanyService(AppDbContext db)
     public async Task<List<CompanyResponse>> GetCompaniesAsync(
         string? keyword,
         string? status,
-        bool onlyMine,
-        Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
         var query = db.Companies.AsNoTracking();
@@ -51,23 +49,19 @@ public sealed class CompanyService(AppDbContext db)
             query = query.Where(c => c.Status == companyStatus);
         }
 
-        if (onlyMine)
-            query = query.Where(c => c.CreatedBy == currentUserId);
-
         var companies = await query
             .OrderByDescending(c => c.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        return await ToResponsesAsync(companies, currentUserId, cancellationToken);
+        return await ToResponsesAsync(companies, cancellationToken);
     }
 
     public async Task<CompanyDetailResponse> GetDetailAsync(
         Guid id,
-        Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
         var company = await FindCompanyAsync(id, tracking: false, cancellationToken);
-        var response = (await ToResponsesAsync([company], currentUserId, cancellationToken)).Single();
+        var response = (await ToResponsesAsync([company], cancellationToken)).Single();
 
         var accounts = await (
             from companyUser in db.CompanyUsers.AsNoTracking()
@@ -116,17 +110,15 @@ public sealed class CompanyService(AppDbContext db)
         db.Companies.Add(company);
         await SaveChangesAsync(cancellationToken);
 
-        return await GetDetailAsync(company.Id, currentUserId, cancellationToken);
+        return await GetDetailAsync(company.Id, cancellationToken);
     }
 
     public async Task<CompanyDetailResponse> UpdateAsync(
         Guid id,
         UpdateCompanyRequest request,
-        Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
         var company = await FindCompanyAsync(id, tracking: true, cancellationToken);
-        EnsureCanEdit(company, currentUserId);
 
         var taxCode = request.TaxCode.Trim();
 
@@ -140,17 +132,15 @@ public sealed class CompanyService(AppDbContext db)
 
         await SaveChangesAsync(cancellationToken);
 
-        return await GetDetailAsync(id, currentUserId, cancellationToken);
+        return await GetDetailAsync(id, cancellationToken);
     }
 
     public async Task<CompanyDetailResponse> UpdateStatusAsync(
         Guid id,
         UpdateCompanyStatusRequest request,
-        Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
         var company = await FindCompanyAsync(id, tracking: true, cancellationToken);
-        EnsureCanEdit(company, currentUserId);
 
         var status = ParseStatus(request.Status);
 
@@ -161,17 +151,15 @@ public sealed class CompanyService(AppDbContext db)
             await SaveChangesAsync(cancellationToken);
         }
 
-        return await GetDetailAsync(id, currentUserId, cancellationToken);
+        return await GetDetailAsync(id, cancellationToken);
     }
 
     public async Task<CompanyDetailResponse> CreateAccountAsync(
         Guid companyId,
         CreateCompanyAccountRequest request,
-        Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
         var company = await FindCompanyAsync(companyId, tracking: false, cancellationToken);
-        EnsureCanEdit(company, currentUserId);
 
         if (company.Status != CompanyStatus.Active)
         {
@@ -222,7 +210,7 @@ public sealed class CompanyService(AppDbContext db)
 
         await SaveChangesAsync(cancellationToken);
 
-        return await GetDetailAsync(companyId, currentUserId, cancellationToken);
+        return await GetDetailAsync(companyId, cancellationToken);
     }
 
     // ---------------------------------------------------------------- helpers
@@ -236,20 +224,6 @@ public sealed class CompanyService(AppDbContext db)
                    "COMPANY_NOT_FOUND",
                    "Không tìm thấy công ty.",
                    StatusCodes.Status404NotFound);
-    }
-
-    private static bool CanEdit(Company company, Guid currentUserId)
-        => company.CreatedBy is null || company.CreatedBy == currentUserId;
-
-    private static void EnsureCanEdit(Company company, Guid currentUserId)
-    {
-        if (!CanEdit(company, currentUserId))
-        {
-            throw new AppException(
-                "COMPANY_NOT_OWNED",
-                "Chỉ nhân viên tạo công ty này mới được chỉnh sửa.",
-                StatusCodes.Status403Forbidden);
-        }
     }
 
     private async Task EnsureTaxCodeAvailableAsync(
@@ -290,7 +264,6 @@ public sealed class CompanyService(AppDbContext db)
 
     private async Task<List<CompanyResponse>> ToResponsesAsync(
         List<Company> companies,
-        Guid currentUserId,
         CancellationToken cancellationToken)
     {
         var companyIds = companies.Select(c => c.Id).ToList();
@@ -318,7 +291,6 @@ public sealed class CompanyService(AppDbContext db)
             EnumName.ToDatabaseValue(c.Status),
             c.CreatedBy,
             c.CreatedBy is null ? null : creatorNames.GetValueOrDefault(c.CreatedBy.Value),
-            CanEdit(c, currentUserId),
             accountCounts.GetValueOrDefault(c.Id),
             c.CreatedAt)).ToList();
     }

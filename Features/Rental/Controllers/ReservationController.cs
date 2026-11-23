@@ -7,29 +7,28 @@ using Microsoft.AspNetCore.Mvc;
 namespace HeThongHoTroChoThueThietBi.Features.Rental.Controllers;
 
 /// <summary>
-/// Phiếu giữ chỗ (đặt thuê). Sales và Manager được xem; chỉ Sales (người lập phiếu) thao tác.
+/// Phiếu giữ chỗ (đặt thuê). Sales chỉ xem và thao tác phiếu của mình; Manager xem tất cả.
 /// </summary>
 [ApiController]
 [Route("api/reservations")]
 [Authorize(Roles = "SALES,MANAGER")]
 public sealed class ReservationController(ReservationService reservationService) : ControllerBase
 {
-    /// <summary>Danh sách phiếu. status: PENDING, APPROVED, CANCELLED, EXPIRED, CONVERTED; mine=true: phiếu của mình.</summary>
+    /// <summary>Danh sách phiếu. status: PENDING, APPROVED, CANCELLED, EXPIRED, CONVERTED. Sales chỉ nhận phiếu của mình.</summary>
     [HttpGet]
     public async Task<ActionResult<List<ReservationResponse>>> GetReservations(
         [FromQuery] string? keyword,
         [FromQuery] string? status,
-        [FromQuery] bool mine,
         CancellationToken cancellationToken)
     {
-        return Ok(await reservationService.GetReservationsAsync(keyword, status, mine, CurrentUserId(), cancellationToken));
+        return Ok(await reservationService.GetReservationsAsync(keyword, status, CurrentUserId(), CanViewAll(), cancellationToken));
     }
 
     /// <summary>Chi tiết phiếu kèm thiết bị và số lượng khả dụng của từng model.</summary>
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<ReservationDetailResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
-        return Ok(await reservationService.GetDetailAsync(id, CurrentUserId(), cancellationToken));
+        return Ok(await reservationService.GetDetailForViewerAsync(id, CurrentUserId(), CanViewAll(), cancellationToken));
     }
 
     /// <summary>Lập phiếu giữ chỗ (PENDING). Mã phiếu PH-YYYY-NNNN và hạn giữ chỗ do hệ thống tạo.</summary>
@@ -95,4 +94,7 @@ public sealed class ReservationController(ReservationService reservationService)
 
     // Claim NameIdentifier do JwtAuthenticationHandler tạo.
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    // Manager xem mọi phiếu; Sales chỉ xem phiếu do mình lập.
+    private bool CanViewAll() => User.IsInRole("MANAGER");
 }

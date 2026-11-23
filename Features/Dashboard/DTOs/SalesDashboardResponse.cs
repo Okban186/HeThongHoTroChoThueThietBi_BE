@@ -12,7 +12,7 @@ public sealed record SalesDashboardResponse(
     int ActiveContracts,
     // Hợp đồng bị Manager từ chối, cần sửa và gửi lại.
     int RejectedContracts,
-    // Công ty do mình tạo.
+    // Số công ty khách hàng đang hoạt động (dữ liệu dùng chung).
     int Companies,
     List<SalesActivityResponse> RecentActivities
 );

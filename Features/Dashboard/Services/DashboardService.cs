@@ -1,4 +1,5 @@
 using HeThongHoTroChoThueThietBi.Features.Dashboard.DTOs;
+using HeThongHoTroChoThueThietBi.Features.Organization.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
 using HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -39,7 +40,8 @@ public sealed class DashboardService(AppDbContext db)
 
         var rejectedContracts = await contracts.CountAsync(c => c.Status == RentalContractStatus.Rejected, cancellationToken);
 
-        var companies = await db.Companies.AsNoTracking().CountAsync(c => c.CreatedBy == salesId, cancellationToken);
+        // Công ty là dữ liệu dùng chung, đếm số công ty đang hoạt động (không theo người tạo).
+        var companies = await db.Companies.AsNoTracking().CountAsync(c => c.Status == CompanyStatus.Active, cancellationToken);
 
         return new SalesDashboardResponse(
             totalReservations,

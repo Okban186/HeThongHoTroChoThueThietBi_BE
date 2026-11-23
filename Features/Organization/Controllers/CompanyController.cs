@@ -14,21 +14,20 @@ namespace HeThongHoTroChoThueThietBi.Features.Organization.Controllers;
 [Authorize(Roles = "SALES,MANAGER")]
 public sealed class CompanyController(CompanyService companyService) : ControllerBase
 {
-    /// <summary>Danh sách công ty. mine=true: chỉ công ty do mình tạo.</summary>
+    /// <summary>Danh sách công ty (dữ liệu dùng chung cho mọi Sales).</summary>
     [HttpGet]
     public async Task<ActionResult<List<CompanyResponse>>> GetCompanies(
         [FromQuery] string? keyword,
         [FromQuery] string? status,
-        [FromQuery] bool mine,
         CancellationToken cancellationToken)
     {
-        return Ok(await companyService.GetCompaniesAsync(keyword, status, mine, CurrentUserId(), cancellationToken));
+        return Ok(await companyService.GetCompaniesAsync(keyword, status, cancellationToken));
     }
 
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<CompanyDetailResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
-        return Ok(await companyService.GetDetailAsync(id, CurrentUserId(), cancellationToken));
+        return Ok(await companyService.GetDetailAsync(id, cancellationToken));
     }
 
     /// <summary>Tạo công ty. Mã công ty tự sinh (COMP-NNNN), người tạo là Sales đang đăng nhập.</summary>
@@ -50,7 +49,7 @@ public sealed class CompanyController(CompanyService companyService) : Controlle
         [FromBody] UpdateCompanyRequest request,
         CancellationToken cancellationToken)
     {
-        return Ok(await companyService.UpdateAsync(id, request, CurrentUserId(), cancellationToken));
+        return Ok(await companyService.UpdateAsync(id, request, cancellationToken));
     }
 
     [HttpPut("{id:guid}/status")]
@@ -60,7 +59,7 @@ public sealed class CompanyController(CompanyService companyService) : Controlle
         [FromBody] UpdateCompanyStatusRequest request,
         CancellationToken cancellationToken)
     {
-        return Ok(await companyService.UpdateStatusAsync(id, request, CurrentUserId(), cancellationToken));
+        return Ok(await companyService.UpdateStatusAsync(id, request, cancellationToken));
     }
 
     /// <summary>Tạo tài khoản đăng nhập (role COMPANY) cho người của công ty.</summary>
@@ -71,7 +70,7 @@ public sealed class CompanyController(CompanyService companyService) : Controlle
         [FromBody] CreateCompanyAccountRequest request,
         CancellationToken cancellationToken)
     {
-        return Ok(await companyService.CreateAccountAsync(id, request, CurrentUserId(), cancellationToken));
+        return Ok(await companyService.CreateAccountAsync(id, request, cancellationToken));
     }
 
     // Claim NameIdentifier do JwtAuthenticationHandler tạo.
