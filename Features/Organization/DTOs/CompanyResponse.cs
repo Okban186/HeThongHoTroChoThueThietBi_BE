@@ -9,10 +9,9 @@ public sealed record CompanyResponse(
     string? Address,
     // ACTIVE, INACTIVE
     string Status,
+    // Người tạo: chỉ để biết trách nhiệm, không giới hạn quyền sửa.
     Guid? CreatedById,
     string? CreatedByName,
-    // Người đang đăng nhập được sửa công ty này (người tạo, hoặc công ty chưa có người tạo).
-    bool CanEdit,
     int AccountCount,
     DateTimeOffset CreatedAt
 );

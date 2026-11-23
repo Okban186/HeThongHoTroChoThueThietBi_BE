@@ -23,7 +23,8 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 ///        REJECTED có trong DB nhưng không dùng.
 ///
 /// Quy tắc:
-/// - Sales xem mọi phiếu; chỉ người tạo được sửa, xác nhận, mở lại, hủy. Manager chỉ xem.
+/// - Sales chỉ thấy phiếu do mình lập (danh sách và chi tiết) và chỉ người lập được thao tác.
+///   Manager xem được mọi phiếu nhưng không thao tác.
 /// - Mã phiếu PH-YYYY-NNNN. Hạn giữ chỗ = min(lúc tạo + HoldDays, hết ngày bắt đầu thuê).
 /// - Ngày bắt đầu không trước hôm nay; công ty phải đang hoạt động.
 /// - Thêm/sửa thiết bị, đổi ngày, xác nhận đều kiểm tra số lượng khả dụng bằng
@@ -43,8 +44,8 @@ public sealed class ReservationService(
     public async Task<List<ReservationResponse>> GetReservationsAsync(
         string? keyword,
         string? status,
-        bool onlyMine,
         Guid currentUserId,
+        bool canViewAll,
         CancellationToken cancellationToken = default)
     {
         await ExpireOverdueAsync(cancellationToken);
@@ -72,7 +73,7 @@ public sealed class ReservationService(
             query = query.Where(x => x.reservation.Status == reservationStatus);
         }
 
-        if (onlyMine)
+        if (!canViewAll)
             query = query.Where(x => x.reservation.CreatedBy == currentUserId);
 
         var rows = await query
@@ -81,6 +82,24 @@ public sealed class ReservationService(
             .ToListAsync(cancellationToken);
 
         return await ToResponsesAsync(rows, currentUserId, cancellationToken);
+    }
+
+    /// <summary>Chi tiết theo quyền người xem: Sales mở phiếu của người khác nhận 404 như phiếu không tồn tại.</summary>
+    public async Task<ReservationDetailResponse> GetDetailForViewerAsync(
+        Guid id,
+        Guid currentUserId,
+        bool canViewAll,
+        CancellationToken cancellationToken = default)
+    {
+        if (!canViewAll)
+        {
+            var reservation = await FindAsync(id, tracking: false, cancellationToken);
+
+            if (reservation.CreatedBy != currentUserId)
+                throw NotFound();
+        }
+
+        return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
     public async Task<ReservationDetailResponse> GetDetailAsync(
@@ -511,11 +530,11 @@ public sealed class ReservationService(
         var query = tracking ? db.Reservations : db.Reservations.AsNoTracking();
 
         return await query.SingleOrDefaultAsync(r => r.Id == id, cancellationToken)
-               ?? throw new AppException(
-                   "RESERVATION_NOT_FOUND",
-                   "Không tìm thấy phiếu đặt thuê.",
-                   StatusCodes.Status404NotFound);
+               ?? throw NotFound();
     }
+
+    private static AppException NotFound()
+        => new("RESERVATION_NOT_FOUND", "Không tìm thấy phiếu đặt thuê.", StatusCodes.Status404NotFound);
 
     private static void EnsureEditable(
         Reservation reservation,

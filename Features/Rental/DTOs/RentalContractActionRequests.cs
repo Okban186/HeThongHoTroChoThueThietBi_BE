@@ -19,7 +19,7 @@ public sealed class CancelRentalContractRequest
 /// <summary>Sales tải lên bản hợp đồng đã ký (PENDING_SIGNATURE → SIGNED).</summary>
 public sealed class MarkRentalContractSignedRequest
 {
-    // storage_files.id của ảnh hợp đồng đã ký (upload qua upload-ticket + confirm-upload).
+    // storage_files.id của file PDF hợp đồng đã ký (upload qua signed-upload-ticket + confirm-upload).
     [Required(ErrorMessage = "Vui lòng tải lên bản hợp đồng đã ký.")]
     public Guid? ContractFileId { get; init; }
 }

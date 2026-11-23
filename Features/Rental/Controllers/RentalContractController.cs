@@ -20,16 +20,27 @@ public sealed class RentalContractController(ContractService contractService) : 
     public async Task<ActionResult<List<RentalContractResponse>>> GetContracts(
         [FromQuery] string? keyword,
         [FromQuery] string? status,
-        [FromQuery] bool mine,
         CancellationToken cancellationToken)
     {
-        return Ok(await contractService.GetContractsAsync(keyword, status, mine, CurrentUserId(), cancellationToken));
+        return Ok(await contractService.GetContractsAsync(keyword, status, CurrentUserId(), CanViewAll(), cancellationToken));
     }
 
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<RentalContractDetailResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
-        return Ok(await contractService.GetDetailAsync(id, CurrentUserId(), cancellationToken));
+        return Ok(await contractService.GetDetailForViewerAsync(id, CurrentUserId(), CanViewAll(), cancellationToken));
+    }
+
+    /// <summary>
+    /// Xuất hợp đồng PDF điền sẵn thông tin hai bên, thiết bị, dịch vụ, tiền để in và ký.
+    /// Hợp đồng chưa được duyệt có dòng "BẢN NHÁP".
+    /// </summary>
+    [HttpGet("{id:guid}/pdf")]
+    public async Task<IActionResult> ExportPdf(Guid id, CancellationToken cancellationToken)
+    {
+        var (fileName, content) = await contractService.ExportPdfAsync(id, CurrentUserId(), CanViewAll(), cancellationToken);
+
+        return File(content, "application/pdf", fileName);
     }
 
     /// <summary>Giá trị đề xuất (loại thuê, đơn vị tính, đơn giá, cọc) để điền sẵn form tạo hợp đồng.</summary>
@@ -42,7 +53,7 @@ public sealed class RentalContractController(ContractService contractService) : 
         return Ok(await contractService.GetSuggestionAsync(reservationId, CurrentUserId(), cancellationToken));
     }
 
-    /// <summary>Cấp vé upload ảnh giấy tờ / hợp đồng đã ký lên Cloudinary (tối đa 6 ảnh, 5 MB/ảnh).</summary>
+    /// <summary>Cấp vé upload ảnh giấy tờ lên Cloudinary (tối đa 6 ảnh jpg/png/webp, 5 MB/ảnh).</summary>
     [HttpPost("upload-ticket")]
     [Authorize(Roles = "SALES")]
     public async Task<ActionResult<FileUploadTicket>> CreateUploadTicket(
@@ -50,6 +61,14 @@ public sealed class RentalContractController(ContractService contractService) : 
         CancellationToken cancellationToken)
     {
         return Ok(await contractService.CreateUploadTicketAsync(request, CurrentUserId(), cancellationToken));
+    }
+
+    /// <summary>Cấp vé upload bản hợp đồng đã ký (1 file PDF, tối đa 10 MB). Xác nhận qua confirm-upload.</summary>
+    [HttpPost("signed-upload-ticket")]
+    [Authorize(Roles = "SALES")]
+    public async Task<ActionResult<FileUploadTicket>> CreateSignedUploadTicket(CancellationToken cancellationToken)
+    {
+        return Ok(await contractService.CreateSignedUploadTicketAsync(CurrentUserId(), cancellationToken));
     }
 
     /// <summary>Xác nhận ảnh đã upload; trả storageFileId của từng ảnh để gắn vào hợp đồng.</summary>
@@ -112,7 +131,7 @@ public sealed class RentalContractController(ContractService contractService) : 
         return Ok(await contractService.RejectAsync(id, request, CurrentUserId(), cancellationToken));
     }
 
-    /// <summary>Sales tải bản hợp đồng đã ký (PENDING_SIGNATURE → SIGNED).</summary>
+    /// <summary>Sales tải bản hợp đồng đã ký dạng PDF (PENDING_SIGNATURE → SIGNED).</summary>
     [HttpPost("{id:guid}/signed")]
     [Authorize(Roles = "SALES")]
     public async Task<ActionResult<RentalContractDetailResponse>> MarkSigned(
@@ -136,4 +155,7 @@ public sealed class RentalContractController(ContractService contractService) : 
 
     // Claim NameIdentifier do JwtAuthenticationHandler tạo.
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    // Manager xem mọi hợp đồng; Sales chỉ xem hợp đồng do mình tạo.
+    private bool CanViewAll() => User.IsInRole("MANAGER");
 }
