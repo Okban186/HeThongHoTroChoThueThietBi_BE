@@ -36,6 +36,7 @@ public sealed class UserManagementService(AppDbContext db, IFileUploadService up
             ["MANAGER"] = "MNG",
             ["SALES"] = "SAL",
             ["STOREKEEPER"] = "STR",
+            ["LEAD_STOREKEEPER"] = "LEAD_STR",
             ["TECHNICIAN"] = "TEC",
         };
 
