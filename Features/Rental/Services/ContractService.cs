@@ -11,6 +11,7 @@ using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
 using HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 using HeThongHoTroChoThueThietBi.Storage.Entities;
 using Microsoft.EntityFrameworkCore;
+using static HeThongHoTroChoThueThietBi.Features.Rental.Services.RentalPricing;
 using ContractServiceEntity = HeThongHoTroChoThueThietBi.Features.Rental.Entities.RentalContractService;
 
 namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
@@ -28,7 +29,10 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 ///   Sales hủy (trước khi ký)   → CANCELLED
 ///
 /// Quy tắc:
-/// - Thời gian thuê, model, số lượng lấy theo phiếu; Sales chọn loại thuê, đơn vị tính, đơn giá, cọc.
+/// - Thời gian thuê, model, số lượng lấy theo phiếu (tối thiểu 3 ngày).
+/// - Loại thuê, đơn vị tính và đơn giá do hệ thống quyết định theo số ngày và giá niêm yết
+///   của model (xem <see cref="RentalPricing"/>); Sales chỉ chọn tiền cọc và dịch vụ.
+///   Đơn giá được lưu lại tại thời điểm tạo/sửa, giá model đổi sau đó không ảnh hưởng hợp đồng.
 /// - Tiền dòng = số lượng × đơn giá × số đơn vị (ngày, hoặc tháng = ceil(ngày / 30)).
 ///   Tổng = Σ dòng thiết bị + Σ dịch vụ do bên cho thuê thực hiện.
 /// - Giấy tờ bắt buộc: CCCD mặt trước, mặt sau, giấy phép kinh doanh; giấy ủy quyền nếu người ký
@@ -46,7 +50,6 @@ public sealed class ContractService(
     ContractPdfGenerator pdfGenerator)
 {
     private const string CodePrefix = "HD";
-    private const int LongTermThresholdDays = 30;
     private const decimal DefaultDepositRate = 0.2m;
     private const string BusinessLicenseNote = "BUSINESS_LICENSE";
 
@@ -74,8 +77,6 @@ public sealed class ContractService(
     private static readonly string[] DocumentFormats = ["jpg", "jpeg", "png", "webp"];
     private static readonly string[] SignedContractFormats = ["pdf"];
 
-    private static readonly string[] RentalTypes = ["SHORT_TERM", "LONG_TERM"];
-    private static readonly string[] BillingUnits = ["DAILY", "MONTHLY"];
     private static readonly string[] ServiceTypes = ["DELIVERY", "LOADING", "UNLOADING", "OTHER"];
     private static readonly string[] ServiceProviders = ["RENTAL_COMPANY", "CUSTOMER"];
     private static readonly string[] RepresentativeTypes = ["LEGAL_REPRESENTATIVE", "AUTHORIZED_REPRESENTATIVE"];
@@ -314,8 +315,7 @@ public sealed class ContractService(
     {
         var reservation = await FindConvertibleReservationAsync(reservationId, currentUserId, tracking: false, cancellationToken);
         var days = RentalDays(reservation.RequestedFrom, reservation.RequestedTo);
-        var longTerm = days >= LongTermThresholdDays;
-        var billingUnit = longTerm ? "MONTHLY" : "DAILY";
+        var billingUnit = BillingUnitFor(days);
 
         var company = await db.Companies
             .AsNoTracking()
@@ -337,7 +337,7 @@ public sealed class ContractService(
             x.model.Unit,
             x.item.Quantity,
             billingUnit,
-            longTerm ? x.model.RentalPriceMonthly : x.model.RentalPriceDaily,
+            UnitPriceFor(days, x.model.RentalPriceDaily, x.model.RentalPriceMonthly),
             days,
             x.item.Note)).ToList();
 
@@ -351,7 +351,7 @@ public sealed class ContractService(
             reservation.RequestedFrom,
             reservation.RequestedTo,
             days,
-            longTerm ? "LONG_TERM" : "SHORT_TERM",
+            RentalTypeFor(days),
             DefaultDepositRate,
             lines,
             total,
@@ -591,7 +591,6 @@ public sealed class ContractService(
         bool isNew,
         CancellationToken cancellationToken)
     {
-        var rentalType = RequireOneOf(content.RentalType, RentalTypes, "rentalType", "Loại thuê không hợp lệ.");
         var representativeType = RequireOneOf(
             content.Representative!.RepresentativeType, RepresentativeTypes,
             "representative.representativeType", "Tư cách người ký không hợp lệ.");
@@ -642,9 +641,19 @@ public sealed class ContractService(
 
         await EnsureFilesUsableAsync(fileIds, DocumentFormats, currentUserId, contract.Id, cancellationToken);
 
+        // --- dòng thiết bị: đơn vị tính và đơn giá theo số ngày thuê và giá niêm yết của model
         var days = RentalDays(contract.StartDate, contract.EndDate);
+        var billingUnit = BillingUnitFor(days);
 
-        // --- dòng thiết bị
+        var modelIds = sourceItems.Select(i => i.EquipmentModelId).ToList();
+        var prices = await db.EquipmentModels
+            .AsNoTracking()
+            .Where(m => modelIds.Contains(m.Id))
+            .ToDictionaryAsync(
+                m => m.Id,
+                m => UnitPriceFor(days, m.RentalPriceDaily, m.RentalPriceMonthly),
+                cancellationToken);
+
         if (!isNew)
         {
             db.RentalContractItems.RemoveRange(
@@ -656,9 +665,9 @@ public sealed class ContractService(
         foreach (var source in sourceItems)
         {
             var line = requestedItems[source.EquipmentModelId];
-            var billingUnit = RequireOneOf(line.BillingUnit, BillingUnits, "items.billingUnit", "Đơn vị tính không hợp lệ.");
+            var unitPrice = prices[source.EquipmentModelId];
 
-            itemsTotal += source.Quantity * line.AgreedUnitPrice * BillableUnits(billingUnit, days);
+            itemsTotal += source.Quantity * unitPrice * BillableUnits(billingUnit, days);
 
             db.RentalContractItems.Add(new RentalContractItem
             {
@@ -667,7 +676,7 @@ public sealed class ContractService(
                 EquipmentModelId = source.EquipmentModelId,
                 Quantity = source.Quantity,
                 BillingUnit = billingUnit,
-                AgreedUnitPrice = line.AgreedUnitPrice,
+                AgreedUnitPrice = unitPrice,
                 Note = NormalizeOptional(line.Note),
             });
         }
@@ -751,7 +760,7 @@ public sealed class ContractService(
             AddDocument(contract.Id, representative.Id, "AUTHORIZATION_LETTER", 1, documents.AuthorizationLetterFileId!.Value, null, null);
 
         // --- thông tin chung và tiền
-        contract.RentalType = rentalType;
+        contract.RentalType = RentalTypeFor(days);
         contract.DeliveryAddress = NormalizeOptional(content.DeliveryAddress);
         contract.DeliveryNote = NormalizeOptional(content.DeliveryNote);
         contract.Note = NormalizeOptional(content.Note);
@@ -868,6 +877,15 @@ public sealed class ContractService(
             throw new AppException("RESERVATION_NOT_CONVERTIBLE", message, StatusCodes.Status409Conflict);
         }
 
+        // Phiếu lập trước khi có quy định thuê tối thiểu: phải sửa ngày phiếu trước.
+        if (RentalDays(reservation.RequestedFrom, reservation.RequestedTo) < MinRentalDays)
+        {
+            throw new AppException(
+                "RENTAL_PERIOD_TOO_SHORT",
+                $"Thời gian thuê tối thiểu {MinRentalDays} ngày. Hãy mở lại phiếu, sửa ngày thuê rồi xác nhận lại trước khi tạo hợp đồng.",
+                StatusCodes.Status409Conflict);
+        }
+
         return reservation;
     }
 
@@ -934,13 +952,6 @@ public sealed class ContractService(
         return new RentalContractItemResponse(
             id, modelId, code, name, unit, quantity, billingUnit, price, units, quantity * price * units, note);
     }
-
-    /// <summary>Số ngày thuê tính cả ngày đầu và ngày cuối.</summary>
-    public static int RentalDays(DateOnly start, DateOnly end) => end.DayNumber - start.DayNumber + 1;
-
-    /// <summary>DAILY: số ngày; MONTHLY: số tháng làm tròn lên (30 ngày/tháng).</summary>
-    public static int BillableUnits(string billingUnit, int days)
-        => billingUnit == "MONTHLY" ? (int)Math.Ceiling(days / 30m) : days;
 
     private static decimal RoundToThousand(decimal value) => Math.Round(value / 1000m, MidpointRounding.AwayFromZero) * 1000m;
 

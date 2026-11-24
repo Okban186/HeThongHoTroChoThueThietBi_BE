@@ -26,7 +26,7 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 /// - Sales chỉ thấy phiếu do mình lập (danh sách và chi tiết) và chỉ người lập được thao tác.
 ///   Manager xem được mọi phiếu nhưng không thao tác.
 /// - Mã phiếu PH-YYYY-NNNN. Hạn giữ chỗ = min(lúc tạo + HoldDays, hết ngày bắt đầu thuê).
-/// - Ngày bắt đầu không trước hôm nay; công ty phải đang hoạt động.
+/// - Ngày bắt đầu không trước hôm nay; thuê tối thiểu 3 ngày; công ty phải đang hoạt động.
 /// - Thêm/sửa thiết bị, đổi ngày, xác nhận đều kiểm tra số lượng khả dụng bằng
 ///   EquipmentAvailabilityService, trong transaction có khóa model để chống giữ chỗ trùng.
 /// - Phiếu quá hạn được chuyển EXPIRED khi có truy cập (không cần job nền);
@@ -414,6 +414,15 @@ public sealed class ReservationService(
             throw new AppException(
                 "INVALID_DATE_RANGE",
                 "Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.",
+                StatusCodes.Status400BadRequest,
+                "requestedTo");
+        }
+
+        if (RentalPricing.RentalDays(from, to) < RentalPricing.MinRentalDays)
+        {
+            throw new AppException(
+                "RENTAL_PERIOD_TOO_SHORT",
+                $"Thời gian thuê tối thiểu {RentalPricing.MinRentalDays} ngày (tính cả ngày bắt đầu và ngày kết thúc).",
                 StatusCodes.Status400BadRequest,
                 "requestedTo");
         }

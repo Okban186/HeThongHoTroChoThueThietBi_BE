@@ -4,7 +4,8 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
 
 /// <summary>
 /// Tạo hợp đồng từ phiếu giữ chỗ đã xác nhận.
-/// Thời gian thuê, model và số lượng lấy theo phiếu; Sales chọn đơn vị tính và đơn giá.
+/// Thời gian thuê, model và số lượng lấy theo phiếu; loại thuê, đơn vị tính và đơn giá
+/// do hệ thống tính theo số ngày thuê và giá niêm yết của model.
 /// </summary>
 public sealed class CreateRentalContractRequest : RentalContractContent
 {
@@ -17,10 +18,6 @@ public sealed class UpdateRentalContractRequest : RentalContractContent;
 
 public abstract class RentalContractContent
 {
-    // SHORT_TERM hoặc LONG_TERM.
-    [Required(ErrorMessage = "Vui lòng chọn loại thuê.")]
-    public string RentalType { get; init; } = string.Empty;
-
     [MaxLength(500, ErrorMessage = "Địa chỉ giao hàng tối đa 500 ký tự.")]
     public string? DeliveryAddress { get; init; }
 
@@ -51,13 +48,6 @@ public sealed class RentalContractItemRequest
 {
     [Required]
     public Guid? EquipmentModelId { get; init; }
-
-    // DAILY hoặc MONTHLY.
-    [Required(ErrorMessage = "Vui lòng chọn đơn vị tính.")]
-    public string BillingUnit { get; init; } = string.Empty;
-
-    [Range(0, 999_999_999_999, ErrorMessage = "Đơn giá không hợp lệ.")]
-    public decimal AgreedUnitPrice { get; init; }
 
     [MaxLength(500)]
     public string? Note { get; init; }

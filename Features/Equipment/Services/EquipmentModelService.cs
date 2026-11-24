@@ -1,5 +1,7 @@
 using System.Text.Json;
 using HeThongHoTroChoThueThietBi.Common.Exceptions;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
+using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Equipment.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Entities;
@@ -10,12 +12,13 @@ using Microsoft.EntityFrameworkCore;
 namespace HeThongHoTroChoThueThietBi.Features.Equipment.Services;
 
 /// <summary>
-/// Truy vấn model thiết bị (chỉ đọc) kèm số lượng khả dụng.
-/// Các thao tác tạo/sửa model do nghiệp vụ kho bổ sung sau.
+/// Truy vấn model thiết bị (chỉ đọc) kèm số lượng khả dụng, danh mục và ảnh.
+/// Các thao tác tạo/sửa model nằm ở <see cref="StorekeeperEquipmentService"/>.
 /// </summary>
 public sealed class EquipmentModelService(
     AppDbContext db,
-    EquipmentAvailabilityService availabilityService)
+    EquipmentAvailabilityService availabilityService,
+    IFileUploadService fileUploadService)
 {
     public async Task<List<EquipmentModelResponse>> GetActiveModelsAsync(
         string? keyword,
@@ -39,17 +42,7 @@ public sealed class EquipmentModelService(
             .OrderBy(m => m.Name)
             .ToListAsync(cancellationToken);
 
-        var today = EquipmentAvailabilityService.BusinessToday();
-
-        var availability = await availabilityService.GetAvailabilityAsync(
-            models.Select(m => m.Id).ToList(),
-            today,
-            today,
-            cancellationToken: cancellationToken);
-
-        return models
-            .Select(m => ToResponse(m, availability[m.Id]))
-            .ToList();
+        return await ToResponsesAsync(models, cancellationToken);
     }
 
     public async Task<EquipmentModelResponse> GetByIdAsync(
@@ -58,15 +51,7 @@ public sealed class EquipmentModelService(
     {
         var model = await FindModelAsync(id, cancellationToken);
 
-        var today = EquipmentAvailabilityService.BusinessToday();
-
-        var availability = await availabilityService.GetAvailabilityAsync(
-            id,
-            today,
-            today,
-            cancellationToken: cancellationToken);
-
-        return ToResponse(model, availability);
+        return (await ToResponsesAsync([model], cancellationToken)).Single();
     }
 
     public async Task<EquipmentAvailabilityResponse> GetAvailabilityAsync(
@@ -133,24 +118,87 @@ public sealed class EquipmentModelService(
                    StatusCodes.Status404NotFound);
     }
 
-    private static EquipmentModelResponse ToResponse(
-        EquipmentModel model,
-        EquipmentAvailabilityResult availability)
+    /// <summary>Ghép số lượng khả dụng hôm nay, tổng số máy, danh mục và ảnh cho danh sách model.</summary>
+    private async Task<List<EquipmentModelResponse>> ToResponsesAsync(
+        List<EquipmentModel> models,
+        CancellationToken cancellationToken)
     {
-        return new EquipmentModelResponse(
-            model.Id,
-            model.Code,
-            model.Name,
-            model.Manufacturer,
-            model.ModelNumber,
-            model.Description,
-            model.Unit,
-            model.RentalPriceDaily,
-            model.RentalPriceMonthly,
-            ParseSpecifications(model.Specifications),
-            EnumName.ToDatabaseValue(model.Status),
-            availability.OperationalUnits,
-            availability.AvailableQuantity);
+        if (models.Count == 0)
+            return [];
+
+        var modelIds = models.Select(m => m.Id).ToList();
+        var today = EquipmentAvailabilityService.BusinessToday();
+
+        var availability = await availabilityService.GetAvailabilityAsync(
+            modelIds,
+            today,
+            today,
+            cancellationToken: cancellationToken);
+
+        var totalUnits = await db.Equipments
+            .AsNoTracking()
+            .Where(e => modelIds.Contains(e.EquipmentModelId))
+            .GroupBy(e => e.EquipmentModelId)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count, cancellationToken);
+
+        var categories = (await (
+                from link in db.EquipmentModelCategories.AsNoTracking()
+                join category in db.Categories.AsNoTracking() on link.CategoryId equals category.Id
+                where modelIds.Contains(link.EquipmentModelId)
+                orderby category.Name
+                select new { link.EquipmentModelId, category }
+            ).ToListAsync(cancellationToken))
+            .ToLookup(
+                x => x.EquipmentModelId,
+                x => new CategoryResponse(
+                    x.category.Id,
+                    x.category.ParentId,
+                    x.category.Code,
+                    x.category.Name,
+                    x.category.Description,
+                    EnumName.ToDatabaseValue(x.category.Status),
+                    0));
+
+        var media = (await (
+                from item in db.EquipmentModelMedia.AsNoTracking()
+                join file in db.StorageFiles.AsNoTracking() on item.StorageFileId equals file.Id
+                where modelIds.Contains(item.EquipmentModelId)
+                orderby item.IsPrimary descending, item.DisplayOrder
+                select new { item, file }
+            ).ToListAsync(cancellationToken))
+            .ToLookup(
+                x => x.item.EquipmentModelId,
+                x => new EquipmentModelMediaResponse(
+                    x.item.Id,
+                    x.item.StorageFileId,
+                    fileUploadService.GetPrivateImageUrl(
+                        $"{x.file.BucketName}/{x.file.ObjectKey}",
+                        x.file.ResourceType.ToCloudinaryNetResourceType(),
+                        x.file.ContentType!),
+                    x.item.MediaType,
+                    x.item.DisplayOrder,
+                    x.item.IsPrimary));
+
+        return models
+            .Select(model => new EquipmentModelResponse(
+                model.Id,
+                model.Code,
+                model.Name,
+                model.Manufacturer,
+                model.ModelNumber,
+                model.Description,
+                model.Unit,
+                model.RentalPriceDaily,
+                model.RentalPriceMonthly,
+                ParseSpecifications(model.Specifications),
+                EnumName.ToDatabaseValue(model.Status),
+                availability[model.Id].OperationalUnits,
+                availability[model.Id].AvailableQuantity,
+                totalUnits.GetValueOrDefault(model.Id),
+                categories[model.Id].ToList(),
+                media[model.Id].ToList()))
+            .ToList();
     }
 
     private static EquipmentAvailabilityResponse ToAvailabilityResponse(
