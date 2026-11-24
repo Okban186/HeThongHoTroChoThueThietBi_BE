@@ -20,4 +20,9 @@ public sealed class DashboardController(DashboardService dashboardService) : Con
 
         return Ok(await dashboardService.GetSalesDashboardAsync(salesId, cancellationToken));
     }
+
+    [HttpGet("storekeeper")]
+    [Authorize(Roles = "LEAD_STOREKEEPER,STOREKEEPER")]
+    public async Task<ActionResult<StorekeeperDashboardResponse>> GetStorekeeperDashboard(CancellationToken ct)
+    => Ok(await dashboardService.GetStorekeeperDashboardAsync(ct));
 }
