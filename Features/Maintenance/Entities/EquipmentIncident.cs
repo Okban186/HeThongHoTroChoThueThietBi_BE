@@ -44,4 +44,16 @@ public class EquipmentIncident
     [Column("updated_at", TypeName = "timestamp with time zone")]
     public DateTimeOffset UpdatedAt { get; set; }
 
+    // Các cột bổ sung 2026-11-24 (sự cố do khách hàng COMPANY báo).
+    [Column("reported_by")]
+    public Guid? ReportedBy { get; set; }
+
+    [Column("contact_name")]
+    [MaxLength(150)]
+    public string? ContactName { get; set; }
+
+    [Column("contact_phone")]
+    [MaxLength(20)]
+    public string? ContactPhone { get; set; }
+
 }
