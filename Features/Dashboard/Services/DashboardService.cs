@@ -1,5 +1,7 @@
+using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Dashboard.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Organization.Enums;
+using HeThongHoTroChoThueThietBi.Features.Equipment.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
 using HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -101,6 +103,47 @@ public sealed class DashboardService(AppDbContext db)
             .OrderByDescending(a => a.OccurredAt)
             .Take(RecentActivityLimit)
             .ToList();
+    }
+
+    public async Task<StorekeeperDashboardResponse> GetStorekeeperDashboardAsync(CancellationToken ct = default)
+    {
+        var totalModels = await db.EquipmentModels.CountAsync(ct);
+        var activeModels = await db.EquipmentModels.CountAsync(m => m.Status == EquipmentModelStatus.Active, ct);
+
+        var statusCounts = await db.Equipments.AsNoTracking()
+            .GroupBy(e => e.Status)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+        int CountOf(EquipmentStatus s) => statusCounts.GetValueOrDefault(s);
+        var totalEq = statusCounts.Values.Sum();
+
+        var outOfStockModels = await db.EquipmentModels.AsNoTracking()
+            .Where(m => m.Status == EquipmentModelStatus.Active &&
+                !db.Equipments.Any(e => e.EquipmentModelId == m.Id && e.Status == EquipmentStatus.Available))
+            .CountAsync(ct);
+
+        var activeWarehouses = await db.Warehouses.CountAsync(w => w.Status == WarehouseStatus.Active, ct);
+        var activeCategories = await db.Categories.CountAsync(c => c.Status == CategoryStatus.Active, ct);
+
+        var recent = await (from e in db.Equipments.AsNoTracking()
+                            join m in db.EquipmentModels.AsNoTracking() on e.EquipmentModelId equals m.Id
+                            join w in db.Warehouses.AsNoTracking() on e.WarehouseId equals w.Id
+                            orderby e.CreatedAt descending
+                            select new StorekeeperRecentEquipmentItem(
+                                e.Id, e.SerialNumber, m.Name, w.Name,
+                                EnumName.ToDatabaseValue(e.Status), e.CreatedAt))
+                            .Take(6)
+                            .ToListAsync(ct);
+
+        return new StorekeeperDashboardResponse(
+            totalModels, activeModels, totalEq,
+            CountOf(EquipmentStatus.Available),
+            CountOf(EquipmentStatus.Rented),
+            CountOf(EquipmentStatus.Reserved),
+            CountOf(EquipmentStatus.Maintenance),
+            CountOf(EquipmentStatus.Damaged) + CountOf(EquipmentStatus.Lost),
+            outOfStockModels, activeWarehouses, activeCategories, recent);
     }
 
     private static string ContractEventText(RentalContractStatus status, RentalContractStatus previous) => status switch
