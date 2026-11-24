@@ -89,6 +89,7 @@ builder.Services.AddScoped<DashboardService>();
 // Equipment
 builder.Services.AddScoped<EquipmentAvailabilityService>();
 builder.Services.AddScoped<EquipmentModelService>();
+builder.Services.AddScoped<StorekeeperEquipmentService>();
 
 // Đặt là true nếu muốn dùng Neon, false nếu muốn dùng Local
 bool useNeon = builder.Configuration.GetValue<bool>("UseNeonCloud");
