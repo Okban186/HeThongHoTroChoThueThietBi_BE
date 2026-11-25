@@ -8,7 +8,7 @@ namespace HeThongHoTroChoThueThietBi.Features.Equipment.Controllers;
 
 [ApiController]
 [Route("api/equipment-models")]
-[Authorize(Roles = "ADMIN,MANAGER,SALES,STOREKEEPER,TECHNICIAN")]
+[Authorize(Roles = "ADMIN,MANAGER,SALES,STOREKEEPER,LEAD_STOREKEEPER,TECHNICIAN,COMPANY")]
 public sealed class EquipmentModelController(EquipmentModelService equipmentModelService) : ControllerBase
 {
     /// <summary>Danh sách model đang hoạt động, kèm số lượng khả dụng hôm nay.</summary>

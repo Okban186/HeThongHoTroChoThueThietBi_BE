@@ -14,6 +14,8 @@ using HeThongHoTroChoThueThietBi.Features.Dashboard.Services;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
 using HeThongHoTroChoThueThietBi.Features.Organization.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.Configurations;
+using HeThongHoTroChoThueThietBi.Features.Customer.Services;
+using HeThongHoTroChoThueThietBi.Features.Operations.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -75,6 +77,10 @@ builder.Services.Configure<ReservationOptions>(
 );
 builder.Services.AddScoped<ReservationService>();
 builder.Services.AddScoped<ContractService>();
+builder.Services.AddScoped<CustomerPortalService>();
+builder.Services.AddScoped<CustomerIncidentService>();
+builder.Services.AddScoped<HandoverService>();
+builder.Services.AddScoped<EquipmentReturnService>();
 builder.Services.Configure<LessorOptions>(
     builder.Configuration.GetSection(LessorOptions.SectionName)
 );

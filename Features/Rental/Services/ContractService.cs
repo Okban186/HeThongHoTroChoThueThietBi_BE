@@ -151,6 +151,13 @@ public sealed class ContractService(
         CancellationToken cancellationToken = default)
     {
         var detail = await GetDetailForViewerAsync(id, currentUserId, canViewAll, cancellationToken);
+        return await BuildPdfAsync(detail, cancellationToken);
+    }
+
+    private async Task<(string FileName, byte[] Content)> BuildPdfAsync(
+        RentalContractDetailResponse detail,
+        CancellationToken cancellationToken)
+    {
         var contract = detail.Contract;
 
         if (contract.Status == EnumName.ToDatabaseValue(RentalContractStatus.Cancelled))
@@ -198,6 +205,92 @@ public sealed class ContractService(
 
         return ($"{contract.ContractCode}.pdf", content);
     }
+
+    // ================================================================ khách hàng (COMPANY)
+
+    // Giai đoạn nội bộ, khách hàng không thấy: soạn, chờ duyệt, bị từ chối.
+    private static readonly RentalContractStatus[] InternalStatuses =
+    [
+        RentalContractStatus.Draft,
+        RentalContractStatus.PendingApproval,
+        RentalContractStatus.Rejected,
+    ];
+
+    /// <summary>
+    /// Hợp đồng khách hàng được thấy: của công ty mình, đã qua bước duyệt
+    /// (hợp đồng bị hủy khi còn nội bộ thì không hiện).
+    /// </summary>
+    private IQueryable<RentalContract> CustomerVisible(Guid companyId) =>
+        db.RentalContracts.AsNoTracking().Where(c =>
+            c.CompanyId == companyId &&
+            !InternalStatuses.Contains(c.Status) &&
+            (c.Status != RentalContractStatus.Cancelled || c.ApprovedAt != null));
+
+    public async Task<List<RentalContractResponse>> GetCompanyContractsAsync(
+        Guid companyId,
+        string? status,
+        Guid currentUserId,
+        CancellationToken cancellationToken = default)
+    {
+        var query = CustomerVisible(companyId);
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            var contractStatus = ParseStatus(status);
+            query = query.Where(c => c.Status == contractStatus);
+        }
+
+        var contracts = await query
+            .OrderByDescending(c => c.StartDate)
+            .ThenByDescending(c => c.CreatedAt)
+            .ToListAsync(cancellationToken);
+
+        return (await ToResponsesAsync(contracts, currentUserId, cancellationToken))
+            .Select(ForCustomer)
+            .ToList();
+    }
+
+    /// <summary>Khách chỉ được xem hợp đồng của công ty mình và đã qua bước duyệt; ngược lại 404.</summary>
+    public async Task EnsureCustomerCanViewAsync(
+        Guid id,
+        Guid companyId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await CustomerVisible(companyId).AnyAsync(c => c.Id == id, cancellationToken))
+            throw NotFound();
+    }
+
+    /// <summary>Chi tiết cho khách hàng: hợp đồng công ty khác hoặc còn nội bộ trả 404.</summary>
+    public async Task<RentalContractDetailResponse> GetCompanyContractDetailAsync(
+        Guid id,
+        Guid companyId,
+        Guid currentUserId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureCustomerCanViewAsync(id, companyId, cancellationToken);
+
+        var detail = await GetDetailAsync(id, currentUserId, cancellationToken);
+        var internalStatuses = InternalStatuses.Select(EnumName.ToDatabaseValue).ToHashSet();
+
+        return detail with
+        {
+            Contract = ForCustomer(detail.Contract),
+            StatusHistory = detail.StatusHistory.Where(h => !internalStatuses.Contains(h.Status)).ToList(),
+        };
+    }
+
+    public async Task<(string FileName, byte[] Content)> ExportCompanyPdfAsync(
+        Guid id,
+        Guid companyId,
+        Guid currentUserId,
+        CancellationToken cancellationToken = default)
+    {
+        var detail = await GetCompanyContractDetailAsync(id, companyId, currentUserId, cancellationToken);
+        return await BuildPdfAsync(detail, cancellationToken);
+    }
+
+    private static RentalContractResponse ForCustomer(RentalContractResponse contract) =>
+        contract with { CanEdit = false, RejectionReason = null };
 
     public async Task<RentalContractDetailResponse> GetDetailAsync(
         Guid id,
