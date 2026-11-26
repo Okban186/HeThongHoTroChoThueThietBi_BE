@@ -21,6 +21,12 @@ public abstract class RentalContractContent
     [MaxLength(500, ErrorMessage = "Địa chỉ giao hàng tối đa 500 ký tự.")]
     public string? DeliveryAddress { get; init; }
 
+    /// <summary>
+    /// Phương thức vận chuyển: RENTAL_COMPANY (bên cho thuê giao &amp; thu hồi, hệ thống tự tính phí)
+    /// hoặc CUSTOMER (khách tự vận chuyển, phí = 0).
+    /// </summary>
+    public string DeliveryProvidedBy { get; init; } = "RENTAL_COMPANY";
+
     [MaxLength(1000, ErrorMessage = "Ghi chú giao hàng tối đa 1000 ký tự.")]
     public string? DeliveryNote { get; init; }
 
@@ -34,6 +40,7 @@ public abstract class RentalContractContent
     [Required, MinLength(1, ErrorMessage = "Hợp đồng phải có thiết bị.")]
     public List<RentalContractItemRequest> Items { get; init; } = [];
 
+    // Giữ lại để tương thích JSON cũ nhưng bị khóa ở Backend (không cho Sales tự thêm dịch vụ).
     [MaxLength(20)]
     public List<RentalContractServiceRequest> Services { get; init; } = [];
 

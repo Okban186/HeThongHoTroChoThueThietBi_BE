@@ -80,7 +80,17 @@ public sealed class CustomerPortalService(AppDbContext db)
             .AsNoTracking()
             .Where(c => c.CompanyId == company.Id &&
                         (ActiveStatuses.Contains(c.Status) || c.Status == RentalContractStatus.PendingSignature))
-            .Select(c => new { c.Id, c.ContractCode, c.StartDate, c.EndDate, c.Status, c.ContractTotalAmount })
+            .Select(c => new
+            {
+                c.Id,
+                c.ContractCode,
+                c.StartDate,
+                c.EndDate,
+                c.Status,
+                c.ContractTotalAmount,
+                c.DepositRequiredAmount,
+                c.DepositPaidAmount,
+            })
             .ToListAsync(cancellationToken);
 
         var active = contracts.Where(c => ActiveStatuses.Contains(c.Status)).ToList();
@@ -91,13 +101,16 @@ public sealed class CustomerPortalService(AppDbContext db)
             .Where(i => activeIds.Contains(i.RentalContractId))
             .SumAsync(i => (int?)i.Quantity, cancellationToken) ?? 0;
 
-        var outstanding = await (
+        var unpaidCharges = await (
             from charge in db.RentalCharges.AsNoTracking()
             join contract in db.RentalContracts.AsNoTracking() on charge.RentalContractId equals contract.Id
             where contract.CompanyId == company.Id &&
                   (charge.Status == RentalChargeStatus.Unpaid || charge.Status == RentalChargeStatus.PartiallyPaid)
             select (decimal?)(charge.Amount - charge.PaidAmount)
         ).SumAsync(cancellationToken) ?? 0;
+
+        var unpaidDeposits = active.Sum(c => Math.Max(0m, c.DepositRequiredAmount - c.DepositPaidAmount));
+        var outstanding = unpaidCharges + unpaidDeposits;
 
         var upcoming = contracts
             .OrderBy(c => c.EndDate)

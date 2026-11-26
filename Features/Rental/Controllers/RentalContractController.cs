@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
+using HeThongHoTroChoThueThietBi.Features.Finance.DTOs;
+using HeThongHoTroChoThueThietBi.Features.Finance.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Rental.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -14,7 +16,9 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Controllers;
 [ApiController]
 [Route("api/rental-contracts")]
 [Authorize(Roles = "SALES,MANAGER")]
-public sealed class RentalContractController(ContractService contractService) : ControllerBase
+public sealed class RentalContractController(
+    ContractService contractService,
+    PaymentService paymentService) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<List<RentalContractResponse>>> GetContracts(
@@ -29,6 +33,13 @@ public sealed class RentalContractController(ContractService contractService) : 
     public async Task<ActionResult<RentalContractDetailResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
         return Ok(await contractService.GetDetailForViewerAsync(id, CurrentUserId(), CanViewAll(), cancellationToken));
+    }
+
+    /// <summary>Tổng quan chi phí, các đợt tiền thuê, khoản phạt và giao dịch thanh toán của hợp đồng.</summary>
+    [HttpGet("{id:guid}/billing")]
+    public async Task<ActionResult<ContractBillingSummaryResponse>> GetBilling(Guid id, CancellationToken cancellationToken)
+    {
+        return Ok(await paymentService.GetContractBillingAsync(id, CurrentUserId(), isCustomer: false, CanViewAll(), cancellationToken));
     }
 
     /// <summary>
@@ -51,6 +62,16 @@ public sealed class RentalContractController(ContractService contractService) : 
         CancellationToken cancellationToken)
     {
         return Ok(await contractService.GetSuggestionAsync(reservationId, CurrentUserId(), cancellationToken));
+    }
+
+    /// <summary>Báo giá phí vận chuyển tự động theo khoảng cách và ưu đãi thuê nhiều (Sales chỉ xem).</summary>
+    [HttpPost("shipping-quote")]
+    [Authorize(Roles = "SALES,MANAGER")]
+    public async Task<ActionResult<ShippingQuoteResponse>> GetShippingQuote(
+        [FromBody] ShippingQuoteRequest request,
+        CancellationToken cancellationToken)
+    {
+        return Ok(await contractService.GetShippingQuoteAsync(request, CurrentUserId(), CanViewAll(), cancellationToken));
     }
 
     /// <summary>Cấp vé upload ảnh giấy tờ lên Cloudinary (tối đa 6 ảnh jpg/png/webp, 5 MB/ảnh).</summary>

@@ -46,6 +46,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<EquipmentReturn> EquipmentReturns => Set<EquipmentReturn>();
     public DbSet<EquipmentReturnItem> EquipmentReturnItems => Set<EquipmentReturnItem>();
     public DbSet<RentalCharge> RentalCharges => Set<RentalCharge>();
+    public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<EquipmentIncident> EquipmentIncidents => Set<EquipmentIncident>();
     public DbSet<EquipmentIncidentItem> EquipmentIncidentItems => Set<EquipmentIncidentItem>();
     public DbSet<IncidentCharge> IncidentCharges => Set<IncidentCharge>();
@@ -872,6 +873,44 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PaymentTransaction>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
+            entity.Property(x => x.RentalContractId).IsRequired();
+            entity.Property(x => x.TargetType).HasColumnType("varchar(30)").IsRequired();
+            entity.Property(x => x.PaymentMethod).HasColumnType("varchar(20)").IsRequired();
+            entity.Property(x => x.TxnRef).HasColumnType("varchar(100)").IsRequired();
+            entity.Property(x => x.Amount).HasColumnType("numeric(18,2)").IsRequired();
+            entity.Property(x => x.OrderInfo).HasColumnType("text").IsRequired();
+            entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'PENDING'").IsRequired();
+            entity.Property(x => x.PaymentUrl).HasColumnType("text");
+            entity.Property(x => x.ExpiresAt).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.VnpTransactionNo).HasColumnType("varchar(100)");
+            entity.Property(x => x.VnpBankCode).HasColumnType("varchar(50)");
+            entity.Property(x => x.VnpResponseCode).HasColumnType("varchar(20)");
+            entity.Property(x => x.VnpPayDate).HasColumnType("varchar(20)");
+            entity.Property(x => x.CreatedBy).IsRequired();
+            entity.Property(x => x.VerifiedAt).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.RejectedReason).HasColumnType("text");
+            entity.Property(x => x.Note).HasColumnType("text");
+            entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
+            entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
+
+            entity.HasIndex(x => x.TxnRef).IsUnique();
+            entity.HasIndex(x => x.RentalContractId);
+            entity.HasIndex(x => x.RentalChargeId);
+            entity.HasIndex(x => x.IncidentChargeId);
+            entity.HasIndex(x => x.Status);
+
+            entity.HasOne<RentalContract>().WithMany().HasForeignKey(x => x.RentalContractId);
+            entity.HasOne<RentalCharge>().WithMany().HasForeignKey(x => x.RentalChargeId);
+            entity.HasOne<IncidentCharge>().WithMany().HasForeignKey(x => x.IncidentChargeId);
+            entity.HasOne<StorageFile>().WithMany().HasForeignKey(x => x.ReceiptFileId);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.CreatedBy);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.VerifiedBy);
         });
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
