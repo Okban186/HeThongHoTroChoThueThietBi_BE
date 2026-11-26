@@ -5,6 +5,8 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
+using HeThongHoTroChoThueThietBi.Features.Finance.Entities;
+using HeThongHoTroChoThueThietBi.Features.Finance.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Rental.Entities;
 using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
@@ -47,7 +49,8 @@ public sealed class ContractService(
     AppDbContext db,
     EquipmentAvailabilityService availabilityService,
     IFileUploadService uploadService,
-    ContractPdfGenerator pdfGenerator)
+    ContractPdfGenerator pdfGenerator,
+    ShippingFeeService shippingFeeService)
 {
     private const string CodePrefix = "HD";
     private const decimal DefaultDepositRate = 0.2m;
@@ -441,6 +444,7 @@ public sealed class ContractService(
             reservation.ReservationCode,
             company.Id,
             company.Name,
+            company.Address,
             reservation.RequestedFrom,
             reservation.RequestedTo,
             days,
@@ -448,7 +452,72 @@ public sealed class ContractService(
             DefaultDepositRate,
             lines,
             total,
-            RoundToThousand(total * DefaultDepositRate));
+            RoundToThousand(total * DefaultDepositRate),
+            shippingFeeService.BuildPolicySummary());
+    }
+
+    /// <summary>Tính trước phí vận chuyển tự động từ Kho chính tới địa chỉ giao hàng.</summary>
+    public async Task<ShippingQuoteResponse> GetShippingQuoteAsync(
+        ShippingQuoteRequest request,
+        Guid currentUserId,
+        bool canViewAll,
+        CancellationToken cancellationToken = default)
+    {
+        decimal itemsTotal;
+        int totalQuantity;
+
+        if (request.ReservationId is not null)
+        {
+            var reservation = await FindConvertibleReservationAsync(
+                request.ReservationId.Value, currentUserId, tracking: false, cancellationToken);
+            var days = RentalDays(reservation.RequestedFrom, reservation.RequestedTo);
+            var billingUnit = BillingUnitFor(days);
+
+            var rows = await (
+                from item in db.ReservationItems.AsNoTracking()
+                join model in db.EquipmentModels.AsNoTracking() on item.EquipmentModelId equals model.Id
+                where item.ReservationId == reservation.Id
+                select new { item.Quantity, model.RentalPriceDaily, model.RentalPriceMonthly }
+            ).ToListAsync(cancellationToken);
+
+            var units = BillableUnits(billingUnit, days);
+            itemsTotal = rows.Sum(r => r.Quantity * UnitPriceFor(days, r.RentalPriceDaily, r.RentalPriceMonthly) * units);
+            totalQuantity = rows.Sum(r => r.Quantity);
+        }
+        else if (request.ContractId is not null)
+        {
+            var contract = await FindAsync(request.ContractId.Value, tracking: false, cancellationToken);
+            if (!canViewAll && contract.CreatedBy != currentUserId)
+                throw NotFound();
+
+            var days = RentalDays(contract.StartDate, contract.EndDate);
+            var billingUnit = BillingUnitFor(days);
+            var units = BillableUnits(billingUnit, days);
+
+            var rows = await (
+                from item in db.RentalContractItems.AsNoTracking()
+                join model in db.EquipmentModels.AsNoTracking() on item.EquipmentModelId equals model.Id
+                where item.RentalContractId == contract.Id
+                select new { item.Quantity, model.RentalPriceDaily, model.RentalPriceMonthly }
+            ).ToListAsync(cancellationToken);
+
+            itemsTotal = rows.Sum(r => r.Quantity * UnitPriceFor(days, r.RentalPriceDaily, r.RentalPriceMonthly) * units);
+            totalQuantity = rows.Sum(r => r.Quantity);
+        }
+        else
+        {
+            throw new AppException(
+                "SHIPPING_QUOTE_SOURCE_REQUIRED",
+                "Cần truyền reservationId hoặc contractId để tính phí vận chuyển.",
+                StatusCodes.Status400BadRequest);
+        }
+
+        return await shippingFeeService.CalculateAsync(
+            request.ProvidedBy,
+            request.DeliveryAddress,
+            itemsTotal,
+            totalQuantity,
+            cancellationToken);
     }
 
     // ================================================================ upload giấy tờ
@@ -620,13 +689,15 @@ public sealed class ContractService(
         return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
-    /// <summary>Sales tải bản hợp đồng đã ký (PENDING_SIGNATURE → SIGNED).</summary>
+    /// <summary>Sales tải bản hợp đồng đã ký (PENDING_SIGNATURE → SIGNED) và tự động sinh các đợt tiền thuê.</summary>
     public async Task<RentalContractDetailResponse> MarkSignedAsync(
         Guid id,
         MarkRentalContractSignedRequest request,
         Guid currentUserId,
         CancellationToken cancellationToken = default)
     {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
         var contract = await FindAsync(id, tracking: true, cancellationToken);
         EnsureOwner(contract, currentUserId);
         EnsureStatus(contract, RentalContractStatus.PendingSignature);
@@ -641,8 +712,114 @@ public sealed class ContractService(
         contract.EffectiveTo = contract.EndDate;
         ChangeStatus(contract, RentalContractStatus.Signed, currentUserId, "Đã ký hợp đồng");
 
+        await GenerateRentalChargesIfNeededAsync(contract, currentUserId, cancellationToken);
+
         await SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return await GetDetailAsync(id, currentUserId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Tự động sinh các đợt thanh toán tiền thuê (rental_charges) khi hợp đồng chuyển SIGNED:
+    /// - SHORT_TERM: 1 đợt duy nhất (tiền thuê + phí vận chuyển).
+    /// - LONG_TERM: chia đều theo số tháng làm tròn lên (30 ngày/tháng); đợt cuối giữ nguyên phần ngày dư;
+    ///   phí vận chuyển gộp vào đợt 1 để tổng các đợt khớp 100% ContractTotalAmount.
+    /// </summary>
+    private async Task GenerateRentalChargesIfNeededAsync(
+        RentalContract contract,
+        Guid createdBy,
+        CancellationToken cancellationToken)
+    {
+        var alreadyExists = await db.RentalCharges
+            .AsNoTracking()
+            .AnyAsync(c => c.RentalContractId == contract.Id && c.ChargeType == "RENTAL", cancellationToken);
+
+        if (alreadyExists)
+            return;
+
+        var days = RentalDays(contract.StartDate, contract.EndDate);
+        var items = await db.RentalContractItems
+            .AsNoTracking()
+            .Where(i => i.RentalContractId == contract.Id)
+            .ToListAsync(cancellationToken);
+
+        var shippingFee = await db.RentalContractServices
+            .AsNoTracking()
+            .Where(s => s.RentalContractId == contract.Id && s.ProvidedBy == "RENTAL_COMPANY")
+            .SumAsync(s => (decimal?)s.Amount, cancellationToken) ?? 0m;
+
+        var itemsTotal = items.Sum(i => i.Quantity * i.AgreedUnitPrice * BillableUnits(i.BillingUnit, days));
+        var now = DateTimeOffset.UtcNow;
+
+        if (contract.RentalType == ShortTerm)
+        {
+            var amount = itemsTotal + shippingFee;
+            db.RentalCharges.Add(new RentalCharge
+            {
+                Id = Guid.CreateVersion7(),
+                SourceType = "CONTRACT",
+                RentalContractId = contract.Id,
+                ChargeType = "RENTAL",
+                Description = shippingFee > 0
+                    ? $"Tiền thuê trọn gói ({days} ngày) + Phí vận chuyển"
+                    : $"Tiền thuê trọn gói ({days} ngày)",
+                Quantity = 1,
+                UnitPrice = amount,
+                Amount = amount,
+                PeriodStart = contract.StartDate,
+                PeriodEnd = contract.EndDate,
+                DueDate = contract.EndDate.AddDays(7),
+                PaidAmount = 0,
+                Status = RentalChargeStatus.Unpaid,
+                CreatedBy = createdBy,
+                CreatedAt = now,
+                Note = shippingFee > 0 ? $"Đã gộp phí vận chuyển {shippingFee:N0} đ" : null,
+            });
+            return;
+        }
+
+        // LONG_TERM: chia theo chu kỳ 30 ngày (số đợt = BillableUnits MONTHLY = ceil(days / 30)).
+        var totalMonths = Math.Max(1, BillableUnits(Monthly, days));
+        var baseMonthlyAmount = Math.Floor(itemsTotal / totalMonths);
+
+        for (var i = 0; i < totalMonths; i++)
+        {
+            var installmentNo = i + 1;
+            var periodStart = contract.StartDate.AddDays(i * 30);
+            var periodEnd = installmentNo == totalMonths
+                ? contract.EndDate
+                : contract.StartDate.AddDays(installmentNo * 30 - 1);
+
+            var rentPart = installmentNo == totalMonths
+                ? itemsTotal - baseMonthlyAmount * (totalMonths - 1)
+                : baseMonthlyAmount;
+
+            var shippingPart = installmentNo == 1 ? shippingFee : 0m;
+            var amount = rentPart + shippingPart;
+            var dueDate = periodStart.AddDays(5);
+
+            db.RentalCharges.Add(new RentalCharge
+            {
+                Id = Guid.CreateVersion7(),
+                SourceType = "CONTRACT",
+                RentalContractId = contract.Id,
+                ChargeType = "RENTAL",
+                Description = shippingPart > 0
+                    ? $"Tiền thuê đợt {installmentNo}/{totalMonths} (gồm phí vận chuyển)"
+                    : $"Tiền thuê đợt {installmentNo}/{totalMonths}",
+                Quantity = 1,
+                UnitPrice = amount,
+                Amount = amount,
+                PeriodStart = periodStart,
+                PeriodEnd = periodEnd,
+                DueDate = dueDate,
+                PaidAmount = 0,
+                Status = RentalChargeStatus.Unpaid,
+                CreatedBy = createdBy,
+                CreatedAt = now,
+                Note = shippingPart > 0 ? $"Gồm tiền thuê {rentPart:N0} đ + phí vận chuyển {shippingPart:N0} đ" : null,
+            });
+        }
     }
 
     /// <summary>Sales hủy hợp đồng trước khi ký. Thiết bị được nhả ra theo công thức khả dụng.</summary>
@@ -774,35 +951,45 @@ public sealed class ContractService(
             });
         }
 
-        // --- dịch vụ
+        // --- vận chuyển tự động (khóa không cho Sales tự tạo dịch vụ hay sửa giá vận chuyển)
+        if (content.Services.Count > 0)
+        {
+            throw new AppException(
+                "MANUAL_SERVICES_DISABLED",
+                "Không cho phép tự thêm dịch vụ hoặc chỉnh tay phí vận chuyển; hệ thống tự động tính phí vận chuyển.",
+                StatusCodes.Status400BadRequest,
+                "services");
+        }
+
         if (!isNew)
         {
             db.RentalContractServices.RemoveRange(
                 await db.RentalContractServices.Where(s => s.RentalContractId == contract.Id).ToListAsync(cancellationToken));
         }
 
-        decimal servicesTotal = 0;
+        var totalQuantity = sourceItems.Sum(i => i.Quantity);
+        var shippingQuote = await shippingFeeService.CalculateAsync(
+            content.DeliveryProvidedBy,
+            content.DeliveryAddress,
+            itemsTotal,
+            totalQuantity,
+            cancellationToken);
 
-        foreach (var service in content.Services)
+        var servicesTotal = shippingQuote.ProvidedBy == ShippingFeeService.RentalCompanyProvider
+            ? shippingQuote.FinalFee
+            : 0m;
+
+        db.RentalContractServices.Add(new ContractServiceEntity
         {
-            var providedBy = RequireOneOf(service.ProvidedBy, ServiceProviders, "services.providedBy", "Bên thực hiện không hợp lệ.");
-            var amount = service.Quantity * service.UnitPrice;
-
-            if (providedBy == "RENTAL_COMPANY")
-                servicesTotal += amount;
-
-            db.RentalContractServices.Add(new ContractServiceEntity
-            {
-                Id = Guid.CreateVersion7(),
-                RentalContractId = contract.Id,
-                ServiceType = RequireOneOf(service.ServiceType, ServiceTypes, "services.serviceType", "Loại dịch vụ không hợp lệ."),
-                ProvidedBy = providedBy,
-                Quantity = service.Quantity,
-                UnitPrice = service.UnitPrice,
-                Amount = amount,
-                Note = NormalizeOptional(service.Note),
-            });
-        }
+            Id = Guid.CreateVersion7(),
+            RentalContractId = contract.Id,
+            ServiceType = "DELIVERY",
+            ProvidedBy = shippingQuote.ProvidedBy,
+            Quantity = 1,
+            UnitPrice = servicesTotal,
+            Amount = servicesTotal,
+            Note = shippingQuote.SummaryNote,
+        });
 
         var total = itemsTotal + servicesTotal;
 
@@ -1137,6 +1324,7 @@ public sealed class ContractService(
                 EnumName.ToDatabaseValue(c.Status),
                 c.ContractTotalAmount,
                 c.DepositRequiredAmount,
+                c.DepositPaidAmount,
                 stats?.Count ?? 0,
                 stats?.Total ?? 0,
                 c.CreatedBy,

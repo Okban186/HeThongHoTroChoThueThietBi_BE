@@ -3,6 +3,8 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
 using HeThongHoTroChoThueThietBi.Features.Customer.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Customer.Services;
+using HeThongHoTroChoThueThietBi.Features.Finance.DTOs;
+using HeThongHoTroChoThueThietBi.Features.Finance.Services;
 using HeThongHoTroChoThueThietBi.Features.Operations.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Operations.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
@@ -23,7 +25,8 @@ public sealed class CustomerController(
     CustomerPortalService portalService,
     ContractService contractService,
     CustomerIncidentService incidentService,
-    HandoverService handoverService) : ControllerBase
+    HandoverService handoverService,
+    PaymentService paymentService) : ControllerBase
 {
     [HttpGet("company")]
     public async Task<ActionResult<CustomerCompanyResponse>> GetCompany(CancellationToken cancellationToken)
@@ -71,6 +74,17 @@ public sealed class CustomerController(
         var companyId = await portalService.GetCompanyIdAsync(CurrentUserId(), cancellationToken);
         await contractService.EnsureCustomerCanViewAsync(id, companyId, cancellationToken);
         return Ok(await handoverService.GetContractDeliveriesAsync(id, cancellationToken));
+    }
+
+    /// <summary>Tổng quan chi phí, các đợt thanh toán tiền thuê, khoản phạt/bồi thường và giao dịch thanh toán.</summary>
+    [HttpGet("contracts/{id:guid}/billing")]
+    public async Task<ActionResult<ContractBillingSummaryResponse>> GetContractBilling(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        var companyId = await portalService.GetCompanyIdAsync(CurrentUserId(), cancellationToken);
+        await contractService.EnsureCustomerCanViewAsync(id, companyId, cancellationToken);
+        return Ok(await paymentService.GetContractBillingAsync(id, CurrentUserId(), isCustomer: true, canViewAll: false, cancellationToken));
     }
 
     // ================================================================ sự cố

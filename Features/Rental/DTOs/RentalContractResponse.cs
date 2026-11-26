@@ -17,6 +17,7 @@ public sealed record RentalContractResponse(
     string Status,
     decimal ContractTotalAmount,
     decimal DepositRequiredAmount,
+    decimal DepositPaidAmount,
     int ItemCount,
     int TotalQuantity,
     Guid CreatedById,

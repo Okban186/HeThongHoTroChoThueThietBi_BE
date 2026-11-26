@@ -10,6 +10,7 @@ public sealed record RentalContractSuggestionResponse(
     string ReservationCode,
     Guid CompanyId,
     string CompanyName,
+    string? CompanyAddress,
     DateOnly StartDate,
     DateOnly EndDate,
     int RentalDays,
@@ -17,5 +18,6 @@ public sealed record RentalContractSuggestionResponse(
     decimal DepositRate,
     List<RentalContractItemResponse> Items,
     decimal ContractTotalAmount,
-    decimal DepositRequiredAmount
+    decimal DepositRequiredAmount,
+    string ShippingPolicySummary
 );

@@ -12,6 +12,8 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Services;
 using HeThongHoTroChoThueThietBi.Features.Dashboard.Services;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
+using HeThongHoTroChoThueThietBi.Features.Finance.Configurations;
+using HeThongHoTroChoThueThietBi.Features.Finance.Services;
 using HeThongHoTroChoThueThietBi.Features.Organization.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.Configurations;
 using HeThongHoTroChoThueThietBi.Features.Customer.Services;
@@ -23,6 +25,14 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowApp", policy =>
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .WithExposedHeaders("X-New-Access-Token", "X-Refresh-Token"));
+});
 
 builder.Services.Configure<JwtOptions>(
     builder.Configuration.GetSection("Jwt")
@@ -75,12 +85,25 @@ builder.Services.AddScoped<CompanyService>();
 builder.Services.Configure<ReservationOptions>(
     builder.Configuration.GetSection(ReservationOptions.SectionName)
 );
+builder.Services.Configure<ShippingOptions>(
+    builder.Configuration.GetSection(ShippingOptions.SectionName)
+);
+builder.Services.AddHttpClient<ShippingFeeService>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
 builder.Services.AddScoped<ReservationService>();
 builder.Services.AddScoped<ContractService>();
 builder.Services.AddScoped<CustomerPortalService>();
 builder.Services.AddScoped<CustomerIncidentService>();
 builder.Services.AddScoped<HandoverService>();
 builder.Services.AddScoped<EquipmentReturnService>();
+
+// Finance (VNPAY Sandbox + Thanh toán tiền mặt)
+builder.Services.Configure<VnpayOptions>(
+    builder.Configuration.GetSection(VnpayOptions.SectionName)
+);
+builder.Services.AddScoped<PaymentService>();
 builder.Services.Configure<LessorOptions>(
     builder.Configuration.GetSection(LessorOptions.SectionName)
 );
@@ -135,6 +158,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseCors("AllowApp");
 app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();
