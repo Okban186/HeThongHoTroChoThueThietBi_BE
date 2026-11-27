@@ -20,6 +20,9 @@ public class ReplacementRequestItem
     [Column("note")]
     public string? Note { get; set; }
 
+    [Column("replacement_model_id")]
+    public Guid? ReplacementModelId { get; set; }
+
     [Column("created_at", TypeName = "timestamp with time zone")]
     public DateTimeOffset CreatedAt { get; set; }
 

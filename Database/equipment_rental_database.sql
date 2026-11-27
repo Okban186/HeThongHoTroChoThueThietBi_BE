@@ -375,7 +375,8 @@ CREATE TABLE contract_status_history (
     previous_status VARCHAR(30) NOT NULL,
     changed_by UUID NOT NULL REFERENCES users(id),
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    note TEXT
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 );
 
 -- ============================================================

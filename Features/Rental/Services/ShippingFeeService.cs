@@ -172,17 +172,23 @@ public sealed class ShippingFeeService(
     private async Task<(string Address, double Lat, double Lng)> ResolveMainWarehouseOriginAsync(
         CancellationToken cancellationToken)
     {
-        // Ưu tiên lấy địa chỉ kho hoạt động đầu tiên trong DB nếu có; tọa độ mặc định lấy từ cấu hình Shipping.
+        // Ưu tiên tuyệt đối kho hoạt động trong DB (địa chỉ + tọa độ đã lưu sẵn);
+        // chỉ dùng địa chỉ/tọa độ mặc định trong appsettings.json (Shipping) khi DB chưa có kho hoặc geocode thất bại.
         var mainWarehouse = await db.Warehouses
             .AsNoTracking()
             .Where(w => w.Status == Equipment.Enums.WarehouseStatus.Active)
             .OrderBy(w => w.CreatedAt)
-            .Select(w => new { w.Name, w.Address })
+            .Select(w => new { w.Name, w.Address, w.Latitude, w.Longitude })
             .FirstOrDefaultAsync(cancellationToken);
 
         var originAddress = !string.IsNullOrWhiteSpace(mainWarehouse?.Address)
             ? mainWarehouse.Address.Trim()
             : _options.MainWarehouseAddress;
+
+        if (mainWarehouse?.Latitude is not null && mainWarehouse.Longitude is not null)
+        {
+            return (originAddress, mainWarehouse.Latitude.Value, mainWarehouse.Longitude.Value);
+        }
 
         if (!string.IsNullOrWhiteSpace(mainWarehouse?.Address))
         {

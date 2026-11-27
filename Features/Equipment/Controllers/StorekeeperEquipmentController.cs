@@ -44,6 +44,25 @@ public sealed class StorekeeperEquipmentController(
         return CreatedAtAction(nameof(GetModelDetail), new { id = created.Id }, created);
     }
 
+    [HttpGet("equipment-models/import-template")]
+    [Authorize(Roles = EquipmentRoles.LeadStorekeeperOnly)]
+    public async Task<IActionResult> DownloadModelImportTemplate(CancellationToken ct)
+    {
+        var bytes = await service.GenerateModelImportTemplateAsync(ct);
+        return File(
+            bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "MauNhap_EquipmentModel.xlsx");
+    }
+
+    [HttpPost("equipment-models/import-excel")]
+    [Authorize(Roles = EquipmentRoles.LeadStorekeeperOnly)]
+    [Consumes("multipart/form-data")]
+    public async Task<ActionResult<ImportEquipmentModelsResult>> ImportModelsFromExcel(
+        IFormFile file,
+        CancellationToken ct)
+        => Ok(await service.ImportModelsFromExcelAsync(file, ct));
+
     [HttpPut("categories/{id:guid}/status")]
     [Authorize(Roles = EquipmentRoles.LeadStorekeeperOnly)]
     public async Task<ActionResult<CategoryResponse>> UpdateCategoryStatus(Guid id, [FromBody] UpdateEntityStatusRequest req, CancellationToken ct)
@@ -112,6 +131,11 @@ public sealed class StorekeeperEquipmentController(
     [Authorize(Roles = EquipmentRoles.LeadStorekeeperOnly)]
     public async Task<ActionResult<List<EquipmentItemResponse>>> BatchCreateEquipments([FromBody] BatchCreateEquipmentRequest req, CancellationToken ct)
         => Ok(await service.BatchCreateEquipmentsAsync(req, ct));
+
+    [HttpGet("equipments/{id:guid}/history")]
+    [Authorize(Roles = "LEAD_STOREKEEPER,STOREKEEPER,MANAGER,TECHNICIAN")]
+    public async Task<ActionResult<EquipmentLifecycleHistoryResponse>> GetEquipmentHistory(Guid id, CancellationToken ct)
+        => Ok(await service.GetEquipmentHistoryAsync(id, ct));
 
     [HttpPut("equipments/{id:guid}")]
     [Authorize(Roles = EquipmentRoles.LeadStorekeeperOnly)]

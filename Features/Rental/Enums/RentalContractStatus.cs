@@ -7,6 +7,7 @@ public enum RentalContractStatus
     Rejected,
     PendingSignature,
     Signed,
+    PendingDeposit,
     Preparing,
     PartiallyDelivered,
     Delivered,

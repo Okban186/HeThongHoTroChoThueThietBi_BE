@@ -98,6 +98,16 @@ public sealed class CustomerController(
         return Ok(await incidentService.GetRentedEquipmentsAsync(companyId, cancellationToken));
     }
 
+    /// <summary>Tra cứu nhanh 1 máy công ty đang thuê bằng quét barcode / nhập serial khi báo sự cố.</summary>
+    [HttpGet("equipments/lookup-serial")]
+    public async Task<ActionResult<CustomerRentedEquipmentResponse>> LookupRentedSerial(
+        [FromQuery] string serial,
+        CancellationToken cancellationToken)
+    {
+        var companyId = await portalService.GetCompanyIdAsync(CurrentUserId(), cancellationToken);
+        return Ok(await incidentService.LookupRentedSerialAsync(companyId, serial, cancellationToken));
+    }
+
     /// <summary>Vé upload ảnh sự cố (tối đa 5 ảnh jpg/png/webp, mỗi ảnh ≤ 5 MB).</summary>
     [HttpPost("incidents/upload-ticket")]
     public async Task<ActionResult<FileUploadTicket>> CreateIncidentUploadTicket(

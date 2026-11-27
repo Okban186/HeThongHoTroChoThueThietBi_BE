@@ -6,10 +6,6 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace HeThongHoTroChoThueThietBi.Features.Operations.Controllers;
 
-/// <summary>
-/// Phiếu bàn giao thiết bị. Thủ kho (trưởng và nhân viên) soạn phiếu: chọn máy theo serial,
-/// soạn xong thì chờ duyệt. Quản lý và kỹ thuật viên được xem (duyệt/giao do phần của họ).
-/// </summary>
 [ApiController]
 [Route("api/handovers")]
 [Authorize(Roles = ReadRoles)]
@@ -18,47 +14,52 @@ public sealed class HandoverController(HandoverService handoverService) : Contro
     private const string ReadRoles = "LEAD_STOREKEEPER,STOREKEEPER,MANAGER,TECHNICIAN";
     private const string WriteRoles = "LEAD_STOREKEEPER,STOREKEEPER";
 
-    /// <summary>Hợp đồng đã ký cần soạn bàn giao, kèm tiến độ xếp máy.</summary>
     [HttpGet("contracts")]
     public async Task<ActionResult<List<HandoverContractResponse>>> GetContracts(
         [FromQuery] string? keyword,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.GetContractsToPrepareAsync(keyword, cancellationToken));
-    }
+        => Ok(await handoverService.GetContractsToPrepareAsync(
+            keyword, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
 
     [HttpGet("contracts/{contractId:guid}")]
     public async Task<ActionResult<HandoverContractDetailResponse>> GetContract(
         Guid contractId,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.GetContractDetailAsync(contractId, cancellationToken));
-    }
+        => Ok(await handoverService.GetContractDetailAsync(
+            contractId, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
 
-    /// <summary>Máy sẵn sàng (AVAILABLE, không hỏng) của một model để chọn vào phiếu.</summary>
     [HttpGet("available-equipments")]
     public async Task<ActionResult<List<AvailableEquipmentResponse>>> GetAvailableEquipments(
         [FromQuery] Guid equipmentModelId,
         [FromQuery] string? keyword,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.GetAvailableEquipmentsAsync(equipmentModelId, keyword, cancellationToken));
-    }
+        => Ok(await handoverService.GetAvailableEquipmentsAsync(equipmentModelId, keyword, cancellationToken));
+
+    [HttpGet("lookup-serial")]
+    public async Task<ActionResult<LookupSerialResponse>> LookupSerial(
+        [FromQuery] string serial,
+        [FromQuery] Guid contractId,
+        CancellationToken cancellationToken)
+        => Ok(await handoverService.LookupSerialAsync(serial, contractId, cancellationToken));
 
     [HttpGet]
     public async Task<ActionResult<List<HandoverNoteResponse>>> GetNotes(
         [FromQuery] string? status,
         [FromQuery] string? keyword,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.GetNotesAsync(status, keyword, cancellationToken));
-    }
+        => Ok(await handoverService.GetNotesAsync(
+            status, keyword, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
 
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<HandoverNoteDetailResponse>> GetNote(Guid id, CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.GetNoteDetailAsync(id, cancellationToken));
-    }
+        => Ok(await handoverService.GetNoteDetailAsync(
+            id, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
+
+    /// <summary>Thủ kho tiếp nhận phụ trách soạn phiếu bàn giao chưa có người nhận.</summary>
+    [HttpPost("{id:guid}/claim")]
+    [Authorize(Roles = WriteRoles)]
+    public async Task<ActionResult<HandoverNoteDetailResponse>> Claim(Guid id, CancellationToken cancellationToken)
+        => Ok(await handoverService.ClaimAsync(id, CurrentUserId(), cancellationToken));
 
     [HttpPost]
     [Authorize(Roles = WriteRoles)]
@@ -76,17 +77,20 @@ public sealed class HandoverController(HandoverService handoverService) : Contro
         Guid id,
         SaveHandoverRequest request,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.UpdateAsync(id, request, cancellationToken));
-    }
+        => Ok(await handoverService.UpdateAsync(id, request, CurrentUserId(), cancellationToken));
 
-    /// <summary>Soạn xong: PREPARING → PENDING_APPROVAL (chờ quản lý duyệt xuất kho).</summary>
     [HttpPost("{id:guid}/submit")]
     [Authorize(Roles = WriteRoles)]
     public async Task<ActionResult<HandoverNoteDetailResponse>> Submit(Guid id, CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.SubmitAsync(id, cancellationToken));
-    }
+        => Ok(await handoverService.SubmitAsync(id, CurrentUserId(), cancellationToken));
+
+    [HttpPost("{id:guid}/complete-delivery")]
+    [Authorize(Roles = "TECHNICIAN,MANAGER")]
+    public async Task<ActionResult<HandoverNoteDetailResponse>> CompleteDelivery(
+        Guid id,
+        CompleteHandoverDeliveryRequest request,
+        CancellationToken cancellationToken)
+        => Ok(await handoverService.CompleteDeliveryAsync(id, request, CurrentUserId(), cancellationToken));
 
     [HttpPost("{id:guid}/cancel")]
     [Authorize(Roles = WriteRoles)]
@@ -94,10 +98,12 @@ public sealed class HandoverController(HandoverService handoverService) : Contro
         Guid id,
         CancelHandoverRequest request,
         CancellationToken cancellationToken)
-    {
-        return Ok(await handoverService.CancelAsync(id, request, CurrentUserId(), cancellationToken));
-    }
+        => Ok(await handoverService.CancelAsync(id, request, CurrentUserId(), cancellationToken));
 
-    // Claim NameIdentifier do JwtAuthenticationHandler tạo.
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    // Manager & Technician xem theo chuyến/hợp đồng; Thủ kho (STOREKEEPER & LEAD_STOREKEEPER) chỉ thấy phiếu chưa ai nhận hoặc do chính mình nhận.
+    private bool IsStorekeeperOnly() =>
+        !User.IsInRole("MANAGER") && !User.IsInRole("TECHNICIAN") &&
+        (User.IsInRole("STOREKEEPER") || User.IsInRole("LEAD_STOREKEEPER"));
 }

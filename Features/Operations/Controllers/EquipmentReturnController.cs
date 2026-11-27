@@ -6,10 +6,6 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace HeThongHoTroChoThueThietBi.Features.Operations.Controllers;
 
-/// <summary>
-/// Phiếu nhận trả thiết bị: kỹ thuật viên thu hồi máy về kho, thủ kho kiểm từng serial
-/// (đã nhận + tình trạng / thất lạc) và lập phiếu. Quản lý, kỹ thuật viên được xem.
-/// </summary>
 [ApiController]
 [Route("api/equipment-returns")]
 [Authorize(Roles = ReadRoles)]
@@ -18,36 +14,36 @@ public sealed class EquipmentReturnController(EquipmentReturnService returnServi
     private const string ReadRoles = "LEAD_STOREKEEPER,STOREKEEPER,MANAGER,TECHNICIAN";
     private const string WriteRoles = "LEAD_STOREKEEPER,STOREKEEPER";
 
-    /// <summary>Hợp đồng còn máy ở chỗ khách (đã giao, chưa nhận lại).</summary>
     [HttpGet("contracts")]
     public async Task<ActionResult<List<ReturnContractResponse>>> GetContracts(
         [FromQuery] string? keyword,
         CancellationToken cancellationToken)
-    {
-        return Ok(await returnService.GetContractsAsync(keyword, cancellationToken));
-    }
+        => Ok(await returnService.GetContractsAsync(keyword, cancellationToken));
 
     [HttpGet("contracts/{contractId:guid}")]
     public async Task<ActionResult<ReturnContractDetailResponse>> GetContract(
         Guid contractId,
         CancellationToken cancellationToken)
-    {
-        return Ok(await returnService.GetContractDetailAsync(contractId, cancellationToken));
-    }
+        => Ok(await returnService.GetContractDetailAsync(
+            contractId, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
 
     [HttpGet]
     public async Task<ActionResult<List<EquipmentReturnResponse>>> GetReturns(
         [FromQuery] string? keyword,
         CancellationToken cancellationToken)
-    {
-        return Ok(await returnService.GetReturnsAsync(keyword, cancellationToken));
-    }
+        => Ok(await returnService.GetReturnsAsync(
+            keyword, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
 
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<EquipmentReturnDetailResponse>> GetReturn(Guid id, CancellationToken cancellationToken)
-    {
-        return Ok(await returnService.GetReturnDetailAsync(id, cancellationToken));
-    }
+        => Ok(await returnService.GetReturnDetailAsync(
+            id, CurrentUserId(), IsStorekeeperOnly(), cancellationToken));
+
+    /// <summary>Thủ kho tiếp nhận phụ trách xử lý phiếu thu hồi chưa có người nhận.</summary>
+    [HttpPost("{id:guid}/claim")]
+    [Authorize(Roles = WriteRoles)]
+    public async Task<ActionResult<EquipmentReturnDetailResponse>> Claim(Guid id, CancellationToken cancellationToken)
+        => Ok(await returnService.ClaimAsync(id, CurrentUserId(), cancellationToken));
 
     [HttpPost]
     [Authorize(Roles = WriteRoles)]
@@ -59,6 +55,17 @@ public sealed class EquipmentReturnController(EquipmentReturnService returnServi
         return CreatedAtAction(nameof(GetReturn), new { id = detail.Return.Id }, detail);
     }
 
-    // Claim NameIdentifier do JwtAuthenticationHandler tạo.
+    [HttpPost("{id:guid}/confirm-processing")]
+    [Authorize(Roles = WriteRoles)]
+    public async Task<ActionResult<EquipmentReturnDetailResponse>> ConfirmProcessing(
+        Guid id,
+        ConfirmProcessingReturnRequest request,
+        CancellationToken cancellationToken)
+        => Ok(await returnService.ConfirmProcessingAsync(id, request, CurrentUserId(), cancellationToken));
+
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    private bool IsStorekeeperOnly() =>
+        !User.IsInRole("MANAGER") && !User.IsInRole("TECHNICIAN") &&
+        (User.IsInRole("STOREKEEPER") || User.IsInRole("LEAD_STOREKEEPER"));
 }

@@ -20,7 +20,7 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
 {
     /// <summary>Tạo giao dịch VNPAY Sandbox và trả về paymentUrl để Flutter vẽ mã QR (hạn 15 phút).</summary>
     [HttpPost("vnpay/create")]
-    [Authorize(Roles = "COMPANY,SALES,MANAGER")]
+    [Authorize(Roles = "COMPANY,SALES,MANAGER,TECHNICIAN")]
     public async Task<ActionResult<PaymentTransactionResponse>> CreateVnpayPayment(
         [FromBody] CreateVnpayPaymentRequest request,
         CancellationToken cancellationToken)
@@ -35,6 +35,7 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
             CanViewAll(),
             clientIp,
             fallbackReturnUrl,
+            isTechnicianOnly: IsTechnicianOnly(),
             cancellationToken);
 
         return Ok(result);
@@ -42,7 +43,7 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
 
     /// <summary>Kiểm tra trạng thái giao dịch (Flutter polling 3-5 giây/lần khi đang mở màn QR).</summary>
     [HttpGet("{id:guid}/status")]
-    [Authorize(Roles = "COMPANY,SALES,MANAGER")]
+    [Authorize(Roles = "COMPANY,SALES,MANAGER,TECHNICIAN")]
     public async Task<ActionResult<PaymentTransactionResponse>> GetStatus(
         Guid id,
         CancellationToken cancellationToken)
@@ -53,7 +54,7 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
 
     /// <summary>Khách/Sales hủy mã QR VNPAY đang chờ ngay trên app Flutter.</summary>
     [HttpPost("{id:guid}/cancel")]
-    [Authorize(Roles = "COMPANY,SALES,MANAGER")]
+    [Authorize(Roles = "COMPANY,SALES,MANAGER,TECHNICIAN")]
     public async Task<ActionResult<PaymentTransactionResponse>> Cancel(
         Guid id,
         CancellationToken cancellationToken)
@@ -143,12 +144,12 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
     public async Task<ActionResult<PaymentTransactionResponse>> CreateCashPayment(
         [FromBody] CreateCashPaymentRequest request,
         CancellationToken cancellationToken)
-        => Ok(await paymentService.CreateCashPaymentAsync(request, CurrentUserId(), CanViewAll(), cancellationToken));
+        => Ok(await paymentService.CreateCashPaymentAsync(request, CurrentUserId(), CanViewAll(), isTechnicianOnly: IsTechnicianOnly(), cancellationToken));
 
     [HttpGet("pending-cash")]
     [Authorize(Roles = "MANAGER")]
     public async Task<ActionResult<List<PaymentTransactionResponse>>> GetPendingCashPayments(CancellationToken cancellationToken)
-        => Ok(await paymentService.GetPendingCashPaymentsAsync(cancellationToken));
+        => Ok(await paymentService.GetPendingCashPaymentsAsync(CurrentUserId(), cancellationToken));
 
     [HttpPost("{id:guid}/verify-cash")]
     [Authorize(Roles = "MANAGER")]
@@ -166,4 +167,5 @@ public sealed class PaymentController(PaymentService paymentService) : Controlle
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
     private bool IsCustomer() => User.IsInRole("COMPANY");
     private bool CanViewAll() => User.IsInRole("MANAGER") || User.IsInRole("STOREKEEPER") || User.IsInRole("LEAD_STOREKEEPER") || User.IsInRole("TECHNICIAN");
+    private bool IsTechnicianOnly() => User.IsInRole("TECHNICIAN") && !User.IsInRole("MANAGER") && !User.IsInRole("SALES");
 }

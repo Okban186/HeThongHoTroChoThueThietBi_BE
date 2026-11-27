@@ -3,10 +3,15 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
-using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
+using HeThongHoTroChoThueThietBi.Features.Equipment.Enums;
 using HeThongHoTroChoThueThietBi.Features.Finance.Entities;
 using HeThongHoTroChoThueThietBi.Features.Finance.Enums;
+using HeThongHoTroChoThueThietBi.Features.Finance.Services;
+using HeThongHoTroChoThueThietBi.Features.Operations.Entities;
+using HeThongHoTroChoThueThietBi.Features.Operations.Enums;
+using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Rental.Entities;
 using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
@@ -50,11 +55,15 @@ public sealed class ContractService(
     EquipmentAvailabilityService availabilityService,
     IFileUploadService uploadService,
     ContractPdfGenerator pdfGenerator,
-    ShippingFeeService shippingFeeService)
+    ShippingFeeService shippingFeeService,
+    CompanyDebtGuardService debtGuard,
+    INotificationDispatcher notificationDispatcher)
 {
     private const string CodePrefix = "HD";
     private const decimal DefaultDepositRate = 0.2m;
     private const string BusinessLicenseNote = "BUSINESS_LICENSE";
+    private const int MinAdvanceBookingDays = 3;
+    private const int DepositDeadlineDaysBeforeStart = 2;
 
     private static readonly FileUploadPolicy DocumentUploadPolicy = new()
     {
@@ -114,8 +123,17 @@ public sealed class ContractService(
             query = query.Where(x => x.contract.Status == contractStatus);
         }
 
-        if (!canViewAll)
+        if (canViewAll)
+        {
+
+            query = query.Where(x =>
+                x.contract.Status == RentalContractStatus.PendingApproval ||
+                (x.contract.Status != RentalContractStatus.Draft && x.contract.ApprovedBy == currentUserId));
+        }
+        else
+        {
             query = query.Where(x => x.contract.CreatedBy == currentUserId);
+        }
 
         var contracts = await query
             .OrderByDescending(x => x.contract.CreatedAt)
@@ -132,12 +150,20 @@ public sealed class ContractService(
         bool canViewAll,
         CancellationToken cancellationToken = default)
     {
-        if (!canViewAll)
-        {
-            var contract = await FindAsync(id, tracking: false, cancellationToken);
+        var contract = await FindAsync(id, tracking: false, cancellationToken);
 
-            if (contract.CreatedBy != currentUserId)
+        if (canViewAll)
+        {
+            var canManagerSee =
+                contract.Status == RentalContractStatus.PendingApproval ||
+                (contract.Status != RentalContractStatus.Draft && contract.ApprovedBy == currentUserId);
+
+            if (!canManagerSee)
                 throw NotFound();
+        }
+        else if (contract.CreatedBy != currentUserId)
+        {
+            throw NotFound();
         }
 
         return await GetDetailAsync(id, currentUserId, cancellationToken);
@@ -556,6 +582,8 @@ public sealed class ContractService(
         var reservation = await FindConvertibleReservationAsync(
             request.ReservationId!.Value, currentUserId, tracking: true, cancellationToken);
 
+        await debtGuard.EnsureCompanyHasNoBlockingDebtAsync(reservation.CompanyId, cancellationToken: cancellationToken);
+
         var reservationItems = await db.ReservationItems
             .AsNoTracking()
             .Where(i => i.ReservationId == reservation.Id)
@@ -649,11 +677,39 @@ public sealed class ContractService(
         var contract = await FindAsync(id, tracking: true, cancellationToken);
         EnsureOwner(contract, currentUserId);
         EnsureStatus(contract, RentalContractStatus.Draft, RentalContractStatus.Rejected);
+        await debtGuard.EnsureCompanyHasNoBlockingDebtAsync(contract.CompanyId, excludeContractId: contract.Id, cancellationToken: cancellationToken);
 
         contract.RejectionReason = null;
         ChangeStatus(contract, RentalContractStatus.PendingApproval, currentUserId, "Gửi duyệt");
 
         await SaveChangesAsync(cancellationToken);
+
+        var managerIds = await (
+            from ur in db.UserRoles.AsNoTracking()
+            join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+            where r.Code == "MANAGER"
+            select ur.UserId
+        ).Distinct().ToListAsync(cancellationToken);
+
+        if (managerIds.Count > 0)
+        {
+            var salesName = await db.Users.AsNoTracking()
+                .Where(u => u.Id == currentUserId)
+                .Select(u => u.FullName)
+                .FirstOrDefaultAsync(cancellationToken) ?? "Sales";
+            var companyName = await db.Companies.AsNoTracking()
+                .Where(c => c.Id == contract.CompanyId)
+                .Select(c => c.Name)
+                .FirstOrDefaultAsync(cancellationToken) ?? "";
+
+            await notificationDispatcher.NotifyUsersAsync(
+                managerIds,
+                $"Hợp đồng mới chờ duyệt ({contract.ContractCode})",
+                $"{salesName} vừa gửi duyệt hợp đồng {contract.ContractCode} cho khách hàng {companyName} (tổng giá trị {contract.ContractTotalAmount:N0} đ).",
+                "CONTRACT_PENDING_APPROVAL",
+                cancellationToken: cancellationToken);
+        }
+
         return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
@@ -668,6 +724,27 @@ public sealed class ContractService(
         ChangeStatus(contract, RentalContractStatus.PendingSignature, currentUserId, "Đã duyệt");
 
         await SaveChangesAsync(cancellationToken);
+
+        await notificationDispatcher.NotifyUsersAsync(
+            [contract.CreatedBy],
+            $"Hợp đồng đã được duyệt ({contract.ContractCode})",
+            $"Quản lý đã phê duyệt hợp đồng {contract.ContractCode}. Vui lòng xuất bản PDF cho khách hàng ký và tải bản ký lên hệ thống.",
+            "CONTRACT_APPROVED",
+            cancellationToken: cancellationToken);
+
+        var approveRepEmail = await db.RentalContractRepresentatives.AsNoTracking()
+            .Where(r => r.RentalContractId == contract.Id && r.Email != null)
+            .Select(r => r.Email!)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        await notificationDispatcher.NotifyCompanyAsync(
+            contract.CompanyId,
+            $"Hợp đồng {contract.ContractCode} đã được duyệt — Chờ ký",
+            $"Hợp đồng thuê thiết bị {contract.ContractCode} (từ {contract.StartDate:dd/MM/yyyy} đến {contract.EndDate:dd/MM/yyyy}) đã được phê duyệt. Quý khách vui lòng xem bản PDF, ký xác nhận và gửi lại cho nhân viên kinh doanh.",
+            "CONTRACT_APPROVED",
+            extraEmails: approveRepEmail is not null ? [approveRepEmail] : null,
+            cancellationToken: cancellationToken);
+
         return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
@@ -686,6 +763,14 @@ public sealed class ContractService(
         ChangeStatus(contract, RentalContractStatus.Rejected, currentUserId, reason);
 
         await SaveChangesAsync(cancellationToken);
+
+        await notificationDispatcher.NotifyUsersAsync(
+            [contract.CreatedBy],
+            $"Hợp đồng bị từ chối ({contract.ContractCode})",
+            $"Quản lý đã từ chối hợp đồng {contract.ContractCode}. Lý do: {reason}. Vui lòng chỉnh sửa và gửi duyệt lại.",
+            "CONTRACT_REJECTED",
+            cancellationToken: cancellationToken);
+
         return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
@@ -716,6 +801,26 @@ public sealed class ContractService(
 
         await SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+
+        var targetManagers = contract.ApprovedBy.HasValue
+            ? [contract.ApprovedBy.Value]
+            : await (
+                from ur in db.UserRoles.AsNoTracking()
+                join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+                where r.Code == "MANAGER"
+                select ur.UserId
+            ).Distinct().ToListAsync(cancellationToken);
+
+        if (targetManagers.Count > 0)
+        {
+            await notificationDispatcher.NotifyUsersAsync(
+                targetManagers,
+                $"Bản PDF đã ký chờ duyệt ({contract.ContractCode})",
+                $"Nhân viên kinh doanh vừa tải bản hợp đồng PDF đã ký cho {contract.ContractCode}. Vui lòng kiểm tra và duyệt bản ký để mở bước đặt cọc.",
+                "CONTRACT_SIGNED_PENDING_REVIEW",
+                cancellationToken: cancellationToken);
+        }
+
         return await GetDetailAsync(id, currentUserId, cancellationToken);
     }
 
@@ -1157,6 +1262,17 @@ public sealed class ContractService(
             throw new AppException("RESERVATION_NOT_CONVERTIBLE", message, StatusCodes.Status409Conflict);
         }
 
+        // Không cho tạo hợp đồng thuê ngay hôm nay: ngày bắt đầu thuê phải cách hôm nay tối thiểu 3 ngày
+        // để đảm bảo kịp ký duyệt, đặt cọc (trước ngày thuê 2 ngày), soạn kho và giao hàng.
+        var minStartDate = EquipmentAvailabilityService.BusinessToday().AddDays(MinAdvanceBookingDays);
+        if (reservation.RequestedFrom < minStartDate)
+        {
+            throw new AppException(
+                "START_DATE_TOO_SOON",
+                $"Ngày bắt đầu thuê phải cách hôm nay tối thiểu {MinAdvanceBookingDays} ngày (từ {minStartDate:dd/MM/yyyy} trở đi). Hãy mở lại phiếu giữ chỗ để điều chỉnh ngày thuê trước khi lập hợp đồng.",
+                StatusCodes.Status409Conflict);
+        }
+
         // Phiếu lập trước khi có quy định thuê tối thiểu: phải sửa ngày phiếu trước.
         if (RentalDays(reservation.RequestedFrom, reservation.RequestedTo) < MinRentalDays)
         {
@@ -1231,6 +1347,548 @@ public sealed class ContractService(
 
         return new RentalContractItemResponse(
             id, modelId, code, name, unit, quantity, billingUnit, price, units, quantity * price * units, note);
+    }
+
+    /// <summary>Số ngày thuê tính cả ngày đầu và ngày cuối.</summary>
+    public static int RentalDays(DateOnly start, DateOnly end) => end.DayNumber - start.DayNumber + 1;
+
+    /// <summary>DAILY: số ngày; MONTHLY: số tháng làm tròn lên (30 ngày/tháng).</summary>
+    public static int BillableUnits(string billingUnit, int days)
+        => billingUnit == "MONTHLY" ? (int)Math.Ceiling(days / 30m) : days;
+
+    /// <summary>
+    /// Manager duyệt bản hợp đồng PDF đã ký:
+    /// - Nếu hợp đồng yêu cầu đặt cọc và chưa đóng đủ: SIGNED → PENDING_DEPOSIT (mở cổng đặt cọc VNPAY / Sales thu trực tiếp).
+    /// - Nếu không yêu cầu cọc (hoặc đã đóng đủ cọc): SIGNED → PREPARING để Kho soạn thiết bị ngay.
+    /// </summary>
+    public async Task<RentalContractDetailResponse> ConfirmSignedAsync(
+        Guid id,
+        Guid managerId,
+        CancellationToken cancellationToken = default)
+    {
+        var contract = await FindAsync(id, tracking: true, cancellationToken);
+        EnsureAssignedManager(contract, managerId);
+        EnsureStatus(contract, RentalContractStatus.Signed);
+
+        var needsDeposit = contract.DepositRequiredAmount > 0 && contract.DepositPaidAmount < contract.DepositRequiredAmount;
+        var deadlineDate = contract.StartDate.AddDays(-DepositDeadlineDaysBeforeStart);
+
+        contract.RejectionReason = null;
+
+        if (needsDeposit)
+        {
+            ChangeStatus(
+                contract,
+                RentalContractStatus.PendingDeposit,
+                managerId,
+                $"Quản lý đã duyệt bản PDF đã ký — mở đặt cọc ({contract.DepositRequiredAmount:N0} đ, hạn chót trước ngày {deadlineDate:dd/MM/yyyy}).");
+        }
+        else
+        {
+            ChangeStatus(
+                contract,
+                RentalContractStatus.Preparing,
+                managerId,
+                "Quản lý đã duyệt bản PDF đã ký (không yêu cầu cọc / đã đủ cọc) — chuyển sang chuẩn bị.");
+        }
+
+        await SaveChangesAsync(cancellationToken);
+
+        if (needsDeposit)
+        {
+            var repEmail = await db.RentalContractRepresentatives.AsNoTracking()
+                .Where(r => r.RentalContractId == contract.Id && r.Email != null)
+                .Select(r => r.Email!)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var msg = $"Bản ký hợp đồng {contract.ContractCode} đã được Quản lý phê duyệt. " +
+                      $"Vui lòng hoàn tất tiền đặt cọc {contract.DepositRequiredAmount:N0} đ trước ngày {deadlineDate:dd/MM/yyyy} " +
+                      $"(trước ngày bắt đầu thuê {contract.StartDate:dd/MM/yyyy} 02 ngày). " +
+                      $"Quá thời hạn trên mà chưa nhận đủ tiền cọc, hệ thống sẽ tự động hủy hợp đồng.";
+
+            await notificationDispatcher.NotifyCompanyAsync(
+                contract.CompanyId,
+                $"Hợp đồng {contract.ContractCode} đã duyệt bản ký — Mời đặt cọc",
+                msg,
+                "CONTRACT_PENDING_DEPOSIT",
+                extraEmails: repEmail is not null ? [repEmail] : null,
+                cancellationToken: cancellationToken);
+
+            await notificationDispatcher.NotifyUsersAsync(
+                [contract.CreatedBy],
+                $"Hợp đồng {contract.ContractCode} đã duyệt bản ký — Chờ đặt cọc",
+                $"Quản lý đã duyệt bản ký {contract.ContractCode}. Bạn có thể gửi mã QR VNPAY hoặc xác nhận nhận cọc trực tiếp (hạn chót trước {deadlineDate:dd/MM/yyyy}).",
+                "CONTRACT_PENDING_DEPOSIT",
+                cancellationToken: cancellationToken);
+        }
+
+        return await GetDetailAsync(id, managerId, cancellationToken);
+    }
+
+    /// <summary>Manager từ chối bản PDF đã ký (SIGNED → PENDING_SIGNATURE) yêu cầu Sales nộp lại.</summary>
+    public async Task<RentalContractDetailResponse> RejectSignedAsync(
+        Guid id,
+        RejectRentalContractRequest request,
+        Guid managerId,
+        CancellationToken cancellationToken = default)
+    {
+        var contract = await FindAsync(id, tracking: true, cancellationToken);
+        EnsureAssignedManager(contract, managerId);
+        EnsureStatus(contract, RentalContractStatus.Signed);
+
+        var reason = request.Reason.Trim();
+        contract.RejectionReason = reason;
+        ChangeStatus(contract, RentalContractStatus.PendingSignature, managerId, $"Yêu cầu nộp lại bản ký: {reason}");
+
+        await SaveChangesAsync(cancellationToken);
+
+        await notificationDispatcher.NotifyUsersAsync(
+            [contract.CreatedBy],
+            $"Yêu cầu nộp lại bản PDF đã ký ({contract.ContractCode})",
+            $"Quản lý yêu cầu nộp lại bản hợp đồng PDF đã ký cho {contract.ContractCode}. Lý do: {reason}.",
+            "CONTRACT_SIGNED_REJECTED",
+            cancellationToken: cancellationToken);
+
+        return await GetDetailAsync(id, managerId, cancellationToken);
+    }
+
+    /// <summary>Sales gửi yêu cầu hủy từ bước PREPARING trở đi (→ CANCELLATION_REQUESTED).</summary>
+    public async Task<RentalContractDetailResponse> RequestCancelAsync(
+        Guid id,
+        CancelRentalContractRequest request,
+        Guid salesId,
+        CancellationToken cancellationToken = default)
+    {
+        var contract = await FindAsync(id, tracking: true, cancellationToken);
+        EnsureOwner(contract, salesId);
+        EnsureStatus(
+            contract,
+            RentalContractStatus.PendingDeposit,
+            RentalContractStatus.Preparing,
+            RentalContractStatus.PartiallyDelivered,
+            RentalContractStatus.Delivered);
+
+        var reason = NormalizeOptional(request.Reason);
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new AppException(
+                "CANCELLATION_REASON_REQUIRED",
+                "Vui lòng nhập lý do yêu cầu hủy hợp đồng.",
+                StatusCodes.Status400BadRequest,
+                "reason");
+        }
+
+        contract.CancellationReason = reason;
+        contract.CancellationRequestedAt = DateTimeOffset.UtcNow;
+        contract.CancellationRequestedBy = salesId;
+        ChangeStatus(contract, RentalContractStatus.CancellationRequested, salesId, $"Yêu cầu hủy: {reason}");
+
+        await SaveChangesAsync(cancellationToken);
+
+        var cancelManagers = contract.ApprovedBy.HasValue
+            ? [contract.ApprovedBy.Value]
+            : await (
+                from ur in db.UserRoles.AsNoTracking()
+                join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+                where r.Code == "MANAGER"
+                select ur.UserId
+            ).Distinct().ToListAsync(cancellationToken);
+
+        if (cancelManagers.Count > 0)
+        {
+            await notificationDispatcher.NotifyUsersAsync(
+                cancelManagers,
+                $"Yêu cầu hủy hợp đồng chờ duyệt ({contract.ContractCode})",
+                $"Nhân viên kinh doanh gửi yêu cầu hủy hợp đồng {contract.ContractCode}. Lý do: {reason}. Vui lòng vào xét duyệt.",
+                "CONTRACT_CANCEL_REQUESTED",
+                cancellationToken: cancellationToken);
+        }
+
+        return await GetDetailAsync(id, salesId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Manager hủy trực tiếp hoặc duyệt/từ chối yêu cầu hủy từ bước PREPARING trở đi.
+    /// - Phiếu chưa xuất kho: hủy phiếu, trả máy về AVAILABLE, hủy/cập nhật chuyến giao.
+    /// - Phiếu đang trên đường giao (SHIPPING): hủy chuyến, tự động sinh phiếu thu hồi (PROCESSING)
+    ///   để kho kiểm đếm đủ serial và chuyển vào MAINTENANCE + tạo MaintenanceTask kiểm tra bảo dưỡng.
+    /// - Tài chính: giữ toàn bộ tiền cọc đã đóng, tạo khoản phí vận chuyển + phạt hủy ngang, cấn trừ vào tiền cọc
+    ///   (phần thiếu tạo khoản thu UNPAID) và gửi thông báo App + Email cho công ty.
+    /// </summary>
+    public async Task<RentalContractDetailResponse> ManagerDecideCancelAsync(
+        Guid id,
+        bool approve,
+        string? reason,
+        decimal? penaltyAmount,
+        decimal? transportFeeAmount,
+        Guid managerId,
+        CancellationToken cancellationToken = default)
+    {
+        var contract = await FindAsync(id, tracking: true, cancellationToken);
+
+        if (contract.ApprovedBy is not null)
+            EnsureAssignedManager(contract, managerId);
+
+        if (approve)
+        {
+            if (contract.Status is RentalContractStatus.Completed or RentalContractStatus.Cancelled)
+            {
+                throw new AppException(
+                    "CONTRACT_STATUS_INVALID",
+                    "Hợp đồng đã kết thúc hoặc đã hủy.",
+                    StatusCodes.Status409Conflict);
+            }
+
+            var hasDeliveredHandover = await db.HandoverNotes
+                .AsNoTracking()
+                .AnyAsync(h => h.RentalContractId == id && h.Status == HandoverNoteStatus.Completed, cancellationToken);
+
+            if (hasDeliveredHandover)
+            {
+                throw new AppException(
+                    "CONTRACT_ALREADY_DELIVERED",
+                    "Hợp đồng đã bàn giao thiết bị cho khách. Vui lòng lập phiếu thu hồi thiết bị trước khi thanh lý/hủy hợp đồng.",
+                    StatusCodes.Status409Conflict);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var today = EquipmentAvailabilityService.BusinessToday();
+            var note = NormalizeOptional(reason) ?? contract.CancellationReason ?? "Quản lý hủy hợp đồng";
+
+            contract.CancellationReason = note;
+            contract.CancelledAt = now;
+            contract.CancelledBy = managerId;
+            ChangeStatus(contract, RentalContractStatus.Cancelled, managerId, note);
+
+            // 1. Xử lý các phiếu bàn giao chưa hoàn tất của hợp đồng
+            var activeHandovers = await db.HandoverNotes
+                .Where(h => h.RentalContractId == id && h.Status != HandoverNoteStatus.Cancelled && h.Status != HandoverNoteStatus.Completed)
+                .ToListAsync(cancellationToken);
+
+            var affectedAssignmentIds = activeHandovers
+                .Where(h => h.ServiceAssignmentId.HasValue)
+                .Select(h => h.ServiceAssignmentId!.Value)
+                .Distinct()
+                .ToList();
+
+            var unshippedNoteIds = activeHandovers
+                .Where(h => h.Status is HandoverNoteStatus.Draft or HandoverNoteStatus.Preparing or HandoverNoteStatus.PendingApproval)
+                .Select(h => h.Id)
+                .ToList();
+
+            if (unshippedNoteIds.Count > 0)
+            {
+                var reservedEquipIds = await db.HandoverItems
+                    .AsNoTracking()
+                    .Where(i => unshippedNoteIds.Contains(i.HandoverNoteId))
+                    .Select(i => i.EquipmentId)
+                    .Distinct()
+                    .ToListAsync(cancellationToken);
+
+                if (reservedEquipIds.Count > 0)
+                {
+                    await db.Equipments
+                        .Where(e => reservedEquipIds.Contains(e.Id) && e.Status == EquipmentStatus.Reserved)
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(e => e.Status, EquipmentStatus.Available)
+                            .SetProperty(e => e.UpdatedAt, now), cancellationToken);
+                }
+            }
+
+            var shippingHandovers = activeHandovers
+                .Where(h => h.Status == HandoverNoteStatus.Shipping)
+                .ToList();
+
+            var generatedReturnCodes = new List<string>();
+            if (shippingHandovers.Count > 0)
+            {
+                var returnPrefix = $"TH-{today.Year}-";
+                var existingRetCodes = await db.EquipmentReturns
+                    .AsNoTracking()
+                    .Where(r => r.ReturnCode.StartsWith(returnPrefix))
+                    .Select(r => r.ReturnCode)
+                    .ToListAsync(cancellationToken);
+
+                var nextRetSeq = existingRetCodes
+                    .Select(c => int.TryParse(c[returnPrefix.Length..], out var n) ? n : 0)
+                    .DefaultIfEmpty(0)
+                    .Max() + 1;
+
+                foreach (var sh in shippingHandovers)
+                {
+                    var itemsOnTruck = await db.HandoverItems
+                        .AsNoTracking()
+                        .Where(i => i.HandoverNoteId == sh.Id)
+                        .ToListAsync(cancellationToken);
+
+                    if (itemsOnTruck.Count > 0)
+                    {
+                        var returnCode = $"{returnPrefix}{nextRetSeq++:D4}";
+                        generatedReturnCodes.Add(returnCode);
+
+                        var retEntity = new EquipmentReturn
+                        {
+                            Id = Guid.CreateVersion7(),
+                            ReturnCode = returnCode,
+                            RentalContractId = contract.Id,
+                            ReturnedAt = now,
+                            ReceivedBy = managerId,
+                            Status = EquipmentReturnStatus.Processing,
+                            ReturnType = "CANCELLED_SHIPMENT",
+                            Note = $"Thu hồi do hủy giao giữa chừng ({sh.HandoverCode}): {note}. Kho bắt buộc kiểm đủ serial và chuyển bảo dưỡng trước khi nhập kho.",
+                            CreatedAt = now,
+                            UpdatedAt = now,
+                        };
+                        db.EquipmentReturns.Add(retEntity);
+
+                        foreach (var item in itemsOnTruck)
+                        {
+                            db.EquipmentReturnItems.Add(new EquipmentReturnItem
+                            {
+                                Id = Guid.CreateVersion7(),
+                                EquipmentReturnId = retEntity.Id,
+                                EquipmentId = item.EquipmentId,
+                                Status = EquipmentReturnItemStatus.Returned,
+                                Note = "Chờ kho kiểm nhận & chuyển bảo dưỡng",
+                            });
+                        }
+                    }
+
+                    sh.FailedReason = $"Hợp đồng bị hủy giữa chừng lúc đang giao: {note}";
+                    sh.FailedAt = now;
+                }
+            }
+
+            foreach (var h in activeHandovers)
+            {
+                h.Status = HandoverNoteStatus.Cancelled;
+                h.Note = string.IsNullOrWhiteSpace(h.Note)
+                    ? $"Hủy theo hợp đồng: {note}"
+                    : $"{h.Note}Hủy theo hợp đồng: {note}";
+                h.UpdatedAt = now;
+            }
+
+            // 2. Cập nhật hoặc hủy chuyến giao (service_assignments) liên quan & báo đội kỹ thuật
+            if (affectedAssignmentIds.Count > 0)
+            {
+                var assignments = await db.ServiceAssignments
+                    .Where(a => affectedAssignmentIds.Contains(a.Id)
+                                && a.Status != ServiceAssignmentStatus.Completed
+                                && a.Status != ServiceAssignmentStatus.Cancelled)
+                    .ToListAsync(cancellationToken);
+
+                var cancelledIdsSet = activeHandovers.Select(h => h.Id).ToHashSet();
+
+                foreach (var assignment in assignments)
+                {
+                    var remainingStops = await db.HandoverNotes
+                        .Where(h => h.ServiceAssignmentId == assignment.Id
+                                    && h.Status != HandoverNoteStatus.Cancelled
+                                    && !cancelledIdsSet.Contains(h.Id))
+                        .OrderBy(h => h.StopOrder)
+                        .ToListAsync(cancellationToken);
+
+                    var memberUserIds = await (
+                        from m in db.ServiceAssignmentMembers.AsNoTracking()
+                        join s in db.Staff.AsNoTracking() on m.StaffId equals s.Id
+                        where m.ServiceAssignmentId == assignment.Id
+                        select s.UserId
+                    ).ToListAsync(cancellationToken);
+
+                    if (remainingStops.Count == 0)
+                    {
+                        assignment.Status = ServiceAssignmentStatus.Cancelled;
+                        assignment.Description = string.IsNullOrWhiteSpace(assignment.Description)
+                            ? $"Hủy do hợp đồng {contract.ContractCode} bị hủy."
+                            : $"{assignment.Description} Hủy do hợp đồng {contract.ContractCode} bị hủy.";
+                        assignment.UpdatedAt = now;
+
+                        await notificationDispatcher.NotifyUsersAsync(
+                            memberUserIds,
+                            $"Hủy chuyến giao: {assignment.Title}",
+                            shippingHandovers.Count > 0
+                                ? $"Hợp đồng {contract.ContractCode} bị hủy giữa chừng. Vui lòng mang toàn bộ thiết bị về kho để thủ kho kiểm nhận ({string.Join(", ", generatedReturnCodes)})."
+                                : $"Hợp đồng {contract.ContractCode} đã bị hủy ({note}). Chuyến giao này đã được hủy.",
+                            "DELIVERY_CANCELLED",
+                            cancellationToken: cancellationToken);
+                    }
+                    else
+                    {
+                        for (var idx = 0; idx < remainingStops.Count; idx++)
+                        {
+                            remainingStops[idx].StopOrder = idx + 1;
+                            remainingStops[idx].UpdatedAt = now;
+                        }
+
+                        var remainingCodes = await db.RentalContracts
+                            .AsNoTracking()
+                            .Where(c => remainingStops.Select(s => s.RentalContractId).Contains(c.Id))
+                            .Select(c => c.ContractCode)
+                            .ToListAsync(cancellationToken);
+
+                        assignment.Title = $"Giao lắp {remainingStops.Count} điểm ({string.Join(", ", remainingCodes)})";
+                        assignment.UpdatedAt = now;
+
+                        await notificationDispatcher.NotifyUsersAsync(
+                            memberUserIds,
+                            $"Cập nhật tuyến giao: bỏ điểm {contract.ContractCode}",
+                            $"Hợp đồng {contract.ContractCode} đã bị hủy. Vui lòng bỏ qua điểm này và tiếp tục giao {remainingStops.Count} điểm còn lại.",
+                            "DELIVERY_UPDATED",
+                            cancellationToken: cancellationToken);
+                    }
+                }
+            }
+
+            // 3. Tài chính: giữ toàn bộ tiền cọc, tính phí vận chuyển + phạt hủy ngang, cấn trừ vào tiền cọc
+            var transportFee = Math.Max(0m, transportFeeAmount ?? 0m);
+            var penaltyFee = Math.Max(0m, penaltyAmount ?? 0m);
+            var createdCharges = new List<RentalCharge>();
+
+            if (transportFee > 0m)
+            {
+                var transportCharge = new RentalCharge
+                {
+                    Id = Guid.CreateVersion7(),
+                    SourceType = "CONTRACT",
+                    RentalContractId = contract.Id,
+                    ChargeType = "TRANSPORT",
+                    Description = $"Phí vận chuyển phát sinh do hủy hợp đồng {contract.ContractCode}",
+                    Quantity = 1,
+                    UnitPrice = transportFee,
+                    Amount = transportFee,
+                    DueDate = today.AddDays(3),
+                    PaidAmount = 0m,
+                    Status = RentalChargeStatus.Unpaid,
+                    CreatedBy = managerId,
+                    CreatedAt = now,
+                    Note = note,
+                };
+                db.RentalCharges.Add(transportCharge);
+                createdCharges.Add(transportCharge);
+            }
+
+            if (penaltyFee > 0m)
+            {
+                var penaltyCharge = new RentalCharge
+                {
+                    Id = Guid.CreateVersion7(),
+                    SourceType = "CONTRACT",
+                    RentalContractId = contract.Id,
+                    ChargeType = "EARLY_CANCELLATION",
+                    Description = $"Phí phạt hủy hợp đồng {contract.ContractCode}: {note}",
+                    Quantity = 1,
+                    UnitPrice = penaltyFee,
+                    Amount = penaltyFee,
+                    DueDate = today.AddDays(3),
+                    PaidAmount = 0m,
+                    Status = RentalChargeStatus.Unpaid,
+                    CreatedBy = managerId,
+                    CreatedAt = now,
+                    Note = note,
+                };
+                db.RentalCharges.Add(penaltyCharge);
+                createdCharges.Add(penaltyCharge);
+            }
+
+            var totalPenaltyAndShipping = transportFee + penaltyFee;
+            var availableDeposit = Math.Max(0m, contract.DepositPaidAmount - contract.DepositAppliedAmount - contract.DepositRefundedAmount);
+            var offsetFromDeposit = Math.Min(availableDeposit, totalPenaltyAndShipping);
+
+            if (offsetFromDeposit > 0m)
+            {
+                contract.DepositAppliedAmount += offsetFromDeposit;
+                var remainingOffset = offsetFromDeposit;
+
+                foreach (var charge in createdCharges)
+                {
+                    if (remainingOffset <= 0m) break;
+                    var apply = Math.Min(charge.Amount, remainingOffset);
+                    charge.PaidAmount = apply;
+                    remainingOffset -= apply;
+
+                    if (charge.PaidAmount >= charge.Amount)
+                    {
+                        charge.Status = RentalChargeStatus.Paid;
+                        charge.PaidAt = now;
+                    }
+                    else
+                    {
+                        charge.Status = RentalChargeStatus.PartiallyPaid;
+                    }
+                }
+            }
+
+            var remainingToPay = Math.Max(0m, totalPenaltyAndShipping - offsetFromDeposit);
+
+            var repEmail = await db.RentalContractRepresentatives
+                .AsNoTracking()
+                .Where(r => r.RentalContractId == contract.Id && r.Email != null)
+                .Select(r => r.Email!)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var summaryLines = new List<string>
+            {
+                $"Hợp đồng {contract.ContractCode} đã được xác nhận hủy.",
+                $"Lý do: {note}",
+            };
+
+            if (contract.DepositPaidAmount > 0m || totalPenaltyAndShipping > 0m)
+            {
+                summaryLines.Add($"• Tiền đặt cọc đã đóng (giữ lại theo quy định): {contract.DepositPaidAmount:N0} đ");
+                if (transportFee > 0m)
+                    summaryLines.Add($"• Phí vận chuyển phát sinh: {transportFee:N0} đ");
+                if (penaltyFee > 0m)
+                    summaryLines.Add($"• Phí phạt hủy hợp đồng: {penaltyFee:N0} đ");
+                if (offsetFromDeposit > 0m)
+                    summaryLines.Add($"• Đã cấn trừ từ tiền đặt cọc: {offsetFromDeposit:N0} đ");
+                if (remainingToPay > 0m)
+                    summaryLines.Add($"• Số tiền còn phải thanh toán bổ sung (hạn {today.AddDays(3):dd/MM/yyyy}): {remainingToPay:N0} đ");
+            }
+
+            var notifBody = string.Join("", summaryLines);
+            await notificationDispatcher.NotifyCompanyAsync(
+                contract.CompanyId,
+                $"Thông báo hủy hợp đồng & quyết toán phí ({contract.ContractCode})",
+                notifBody,
+                "CONTRACT_CANCELLED_PENALTY",
+                extraEmails: repEmail is not null ? [repEmail] : null,
+                cancellationToken: cancellationToken);
+
+            await notificationDispatcher.NotifyUsersAsync(
+                [contract.CreatedBy],
+                $"Hợp đồng {contract.ContractCode} đã hủy",
+                notifBody,
+                "CONTRACT_CANCELLED",
+                cancellationToken: cancellationToken);
+        }
+        else
+        {
+            EnsureStatus(contract, RentalContractStatus.CancellationRequested);
+
+            var lastReq = await db.ContractStatusHistory
+                .AsNoTracking()
+                .Where(h => h.RentalContractId == id && h.Status == RentalContractStatus.CancellationRequested)
+                .OrderByDescending(h => h.ChangedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var restoreStatus = lastReq?.PreviousStatus ?? RentalContractStatus.Preparing;
+            var rejectNote = NormalizeOptional(reason) ?? "Không đồng ý hủy hợp đồng";
+            ChangeStatus(contract, restoreStatus, managerId, $"Từ chối yêu cầu hủy: {rejectNote}");
+        }
+
+        await SaveChangesAsync(cancellationToken);
+        return await GetDetailAsync(id, managerId, cancellationToken);
+    }
+
+    private static void EnsureAssignedManager(RentalContract contract, Guid managerUserId)
+    {
+        if (contract.ApprovedBy != managerUserId)
+        {
+            throw new AppException(
+                "FORBIDDEN_MANAGER",
+                "Hợp đồng này do quản lý khác phụ trách.",
+                StatusCodes.Status403Forbidden);
+        }
     }
 
     private static decimal RoundToThousand(decimal value) => Math.Round(value / 1000m, MidpointRounding.AwayFromZero) * 1000m;
@@ -1364,4 +2022,378 @@ public sealed class ContractService(
 
     private static string? NormalizeOptional(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // ================================================================ QUYẾT TOÁN CUỐI HỢP ĐỒNG & HOÀN CỌC (CỤM 3)
+
+    /// <summary>Xem trước bảng đối soát quyết toán cuối hợp đồng: máy còn chưa trả, các khoản nợ/phạt, cấn trừ cọc và hoàn cọc.</summary>
+    public async Task<ContractSettlementPreviewResponse> GetSettlementPreviewAsync(
+        Guid contractId,
+        Guid managerId,
+        CancellationToken ct = default)
+    {
+        var contract = await FindAsync(contractId, tracking: false, ct);
+        EnsureAssignedManager(contract, managerId);
+
+        var companyName = await db.Companies.AsNoTracking()
+            .Where(co => co.Id == contract.CompanyId)
+            .Select(co => co.Name)
+            .SingleAsync(ct);
+
+        var outstandingCount = await CountOutstandingEquipmentsForContractAsync(contractId, ct);
+        var pendingReturnsCount = await db.EquipmentReturns.AsNoTracking()
+            .CountAsync(r => r.RentalContractId == contractId
+                             && (r.Status == EquipmentReturnStatus.Draft || r.Status == EquipmentReturnStatus.Processing), ct);
+
+        var unpaidItems = await GetUnpaidSettlementItemsAsync(contract, ct);
+        var totalUnpaid = unpaidItems.Sum(x => x.RemainingAmount);
+        var availableDeposit = Math.Max(0m, contract.DepositPaidAmount - contract.DepositAppliedAmount - contract.DepositRefundedAmount);
+
+        var projectedOffset = Math.Min(availableDeposit, totalUnpaid);
+        var projectedRefund = Math.Max(0m, availableDeposit - projectedOffset);
+        var projectedShortfall = Math.Max(0m, totalUnpaid - projectedOffset);
+
+        string? blockingReason = null;
+        if (contract.Status is RentalContractStatus.Draft or RentalContractStatus.PendingApproval
+            or RentalContractStatus.Rejected or RentalContractStatus.PendingSignature or RentalContractStatus.Signed)
+        {
+            blockingReason = "Hợp đồng chưa được triển khai bàn giao, không thể quyết toán cuối kỳ.";
+        }
+        else if (outstandingCount > 0)
+        {
+            blockingReason = $"Vẫn còn {outstandingCount} thiết bị đang ở hiện trường chưa thu hồi về kho.";
+        }
+        else if (pendingReturnsCount > 0)
+        {
+            blockingReason = $"Đang có {pendingReturnsCount} phiếu thu hồi chưa hoàn tất kiểm nhận tại kho.";
+        }
+        else if (projectedShortfall > 0)
+        {
+            blockingReason = $"Sau khi cấn trừ hết tiền cọc, khách hàng vẫn còn thiếu {projectedShortfall:N0} đ. Có thể cấn trừ cọc trước; hợp đồng sẽ đóng COMPLETED sau khi khách thanh toán dứt điểm phần thiếu.";
+        }
+
+        var canComplete = outstandingCount == 0 && pendingReturnsCount == 0 && projectedShortfall == 0m
+                          && contract.Status is not (RentalContractStatus.Completed or RentalContractStatus.Cancelled);
+
+        return new ContractSettlementPreviewResponse(
+            contract.Id,
+            contract.ContractCode,
+            companyName,
+            EnumName.ToDatabaseValue(contract.Status),
+            contract.StartDate,
+            contract.EndDate,
+            outstandingCount,
+            pendingReturnsCount,
+            contract.DepositRequiredAmount,
+            contract.DepositPaidAmount,
+            contract.DepositAppliedAmount,
+            contract.DepositRefundedAmount,
+            availableDeposit,
+            totalUnpaid,
+            projectedOffset,
+            projectedRefund,
+            projectedShortfall,
+            canComplete,
+            blockingReason,
+            unpaidItems);
+    }
+
+    /// <summary>Manager xác nhận quyết toán cuối hợp đồng: cấn trừ nợ/phạt vào cọc, ghi nhận hoàn cọc dư và chốt COMPLETED nếu đủ điều kiện.</summary>
+    public async Task<SettleContractResponse> SettleContractAsync(
+        Guid contractId,
+        SettleContractRequest request,
+        Guid managerId,
+        CancellationToken ct = default)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        var contract = await db.RentalContracts
+            .FromSqlInterpolated($"SELECT * FROM rental_contracts WHERE id = {contractId} FOR UPDATE")
+            .SingleOrDefaultAsync(ct)
+            ?? throw NotFound();
+
+        EnsureAssignedManager(contract, managerId);
+
+        if (contract.Status == RentalContractStatus.Completed)
+        {
+            throw new AppException("ALREADY_COMPLETED", "Hợp đồng này đã được quyết toán hoàn tất trước đó.", StatusCodes.Status409Conflict);
+        }
+
+        if (contract.Status is RentalContractStatus.Draft or RentalContractStatus.PendingApproval
+            or RentalContractStatus.Rejected or RentalContractStatus.PendingSignature or RentalContractStatus.Signed)
+        {
+            throw new AppException("INVALID_STATUS", "Hợp đồng chưa đi vào vận hành, không thể quyết toán cuối kỳ.", StatusCodes.Status409Conflict);
+        }
+
+        var outstandingCount = await CountOutstandingEquipmentsForContractAsync(contractId, ct);
+        var pendingReturnsCount = await db.EquipmentReturns.AsNoTracking()
+            .CountAsync(r => r.RentalContractId == contractId
+                             && (r.Status == EquipmentReturnStatus.Draft || r.Status == EquipmentReturnStatus.Processing), ct);
+
+        if (outstandingCount > 0 || pendingReturnsCount > 0)
+        {
+            throw new AppException(
+                "EQUIPMENTS_NOT_FULLY_RETURNED",
+                $"Chưa thể quyết toán cuối kỳ: còn {outstandingCount} thiết bị chưa thu hồi và {pendingReturnsCount} phiếu thu hồi đang chờ xử lý tại kho.",
+                StatusCodes.Status409Conflict);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var availableDeposit = Math.Max(0m, contract.DepositPaidAmount - contract.DepositAppliedAmount - contract.DepositRefundedAmount);
+        var newlyOffset = 0m;
+
+        if (request.ApplyDepositToUnpaidCharges && availableDeposit > 0)
+        {
+            var openCharges = await db.RentalCharges
+                .Where(rc => rc.RentalContractId == contract.Id
+                             && (rc.Status == RentalChargeStatus.Unpaid || rc.Status == RentalChargeStatus.PartiallyPaid)
+                             && rc.Amount > rc.PaidAmount)
+                .OrderBy(rc => rc.ChargeType == "RENTAL" ? 1 : 0)
+                .ThenBy(rc => rc.DueDate ?? DateOnly.MaxValue)
+                .ThenBy(rc => rc.CreatedAt)
+                .ToListAsync(ct);
+
+            foreach (var ch in openCharges)
+            {
+                if (availableDeposit <= 0) break;
+                var need = ch.Amount - ch.PaidAmount;
+                var apply = Math.Min(need, availableDeposit);
+                if (apply <= 0) continue;
+
+                ch.PaidAmount += apply;
+                availableDeposit -= apply;
+                newlyOffset += apply;
+
+                if (ch.PaidAmount >= ch.Amount)
+                {
+                    ch.Status = RentalChargeStatus.Paid;
+                    ch.PaidAt = now;
+                }
+                else
+                {
+                    ch.Status = RentalChargeStatus.PartiallyPaid;
+                }
+
+                var offsetNote = $"Quyết toán cấn trừ {apply:N0} đ từ tiền đặt cọc.";
+                ch.Note = string.IsNullOrWhiteSpace(ch.Note) ? offsetNote : $"{ch.Note} | {offsetNote}";
+
+                if (ch.Status == RentalChargeStatus.Paid)
+                {
+                    var linkedIcs = await db.IncidentCharges
+                        .Where(ic => ic.RentalChargeId == ch.Id && ic.Status == IncidentChargeStatus.Pending)
+                        .ToListAsync(ct);
+                    foreach (var ic in linkedIcs)
+                        ic.Status = IncidentChargeStatus.Charged;
+                }
+            }
+
+            if (availableDeposit > 0)
+            {
+                var eqIdsOfContract = await (
+                    from hn in db.HandoverNotes.AsNoTracking()
+                    join hi in db.HandoverItems.AsNoTracking() on hn.Id equals hi.HandoverNoteId
+                    where hn.RentalContractId == contract.Id
+                    select hi.EquipmentId
+                ).Distinct().ToListAsync(ct);
+
+                var standaloneIcs = await (
+                    from ic in db.IncidentCharges
+                    join ii in db.EquipmentIncidentItems.AsNoTracking() on ic.IncidentItemId equals ii.Id
+                    join inc in db.EquipmentIncidents.AsNoTracking() on ii.IncidentId equals inc.Id
+                    where ic.Status == IncidentChargeStatus.Pending
+                          && ic.RentalChargeId == null
+                          && inc.CompanyId == contract.CompanyId
+                          && eqIdsOfContract.Contains(ii.EquipmentId)
+                    orderby ic.CreatedAt
+                    select ic
+                ).ToListAsync(ct);
+
+                foreach (var ic in standaloneIcs)
+                {
+                    var need = Math.Max(0m, ic.Amount - ic.DepositOffsetAmount);
+                    if (need <= 0 || availableDeposit < need) continue;
+
+                    ic.DepositOffsetAmount += need;
+                    ic.Status = IncidentChargeStatus.Charged;
+                    ic.SettlementMethod = "OFFSET_DEPOSIT";
+                    availableDeposit -= need;
+                    newlyOffset += need;
+                }
+            }
+
+            if (newlyOffset > 0)
+            {
+                contract.DepositAppliedAmount += newlyOffset;
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        var remainingUnpaidItems = await GetUnpaidSettlementItemsAsync(contract, ct);
+        var remainingDebt = remainingUnpaidItems.Sum(x => x.RemainingAmount);
+
+        var newlyRefunded = 0m;
+        if (request.RefundRemainingDeposit && remainingDebt == 0m && availableDeposit > 0m)
+        {
+            var desiredRefund = request.CustomRefundAmount ?? availableDeposit;
+            if (desiredRefund > availableDeposit)
+            {
+                throw new AppException(
+                    "REFUND_EXCEEDS_AVAILABLE_DEPOSIT",
+                    $"Số tiền hoàn cọc ({desiredRefund:N0} đ) vượt quá số dư cọc khả dụng ({availableDeposit:N0} đ).",
+                    StatusCodes.Status400BadRequest);
+            }
+
+            newlyRefunded = desiredRefund;
+            contract.DepositRefundedAmount += newlyRefunded;
+            availableDeposit -= newlyRefunded;
+        }
+
+        var isCompleted = remainingDebt == 0m && contract.Status != RentalContractStatus.Cancelled;
+        var summaryParts = new List<string>();
+        if (newlyOffset > 0) summaryParts.Add($"cấn trừ cọc {newlyOffset:N0} đ");
+        if (newlyRefunded > 0) summaryParts.Add($"hoàn cọc {newlyRefunded:N0} đ");
+        if (remainingDebt > 0) summaryParts.Add($"khách còn thiếu {remainingDebt:N0} đ");
+        if (!string.IsNullOrWhiteSpace(request.Note)) summaryParts.Add($"Ghi chú: {request.Note.Trim()}");
+
+        var historyNote = summaryParts.Count > 0
+            ? $"Quyết toán hợp đồng: {string.Join(", ", summaryParts)}."
+            : "Quyết toán hoàn tất hợp đồng.";
+
+        if (isCompleted)
+        {
+            ChangeStatus(contract, RentalContractStatus.Completed, managerId, historyNote);
+        }
+        else
+        {
+            contract.UpdatedAt = now;
+            AddHistory(contract, contract.Status, contract.Status, managerId, historyNote);
+        }
+
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+
+        var repEmail = await db.RentalContractRepresentatives.AsNoTracking()
+            .Where(r => r.RentalContractId == contract.Id && r.Email != null)
+            .Select(r => r.Email!)
+            .FirstOrDefaultAsync(ct);
+
+        var customerMsg = isCompleted
+            ? $"Hợp đồng {contract.ContractCode} đã được quyết toán hoàn tất (COMPLETED). {historyNote}"
+            : $"Biên bản quyết toán hợp đồng {contract.ContractCode}: {historyNote} Vui lòng thanh toán nốt phần công nợ còn lại ({remainingDebt:N0} đ) để đóng hợp đồng và tiếp tục tạo đơn mới.";
+
+        await notificationDispatcher.NotifyCompanyAsync(
+            contract.CompanyId,
+            isCompleted
+                ? $"Quyết toán hoàn tất hợp đồng {contract.ContractCode}"
+                : $"Thông báo quyết toán & công nợ còn thiếu ({contract.ContractCode})",
+            customerMsg,
+            "CONTRACT_SETTLED",
+            extraEmails: repEmail is not null ? [repEmail] : null,
+            cancellationToken: ct);
+
+        await notificationDispatcher.NotifyUsersAsync(
+            [contract.CreatedBy],
+            $"Quyết toán hợp đồng {contract.ContractCode}",
+            customerMsg,
+            "CONTRACT_SETTLED",
+            cancellationToken: ct);
+
+        var resultMsg = isCompleted
+            ? $"Đã quyết toán hoàn tất hợp đồng {contract.ContractCode} (cấn trừ cọc {newlyOffset:N0} đ, hoàn cọc {newlyRefunded:N0} đ)."
+            : $"Đã ghi nhận cấn trừ cọc {newlyOffset:N0} đ. Khách hàng còn thiếu {remainingDebt:N0} đ — hợp đồng sẽ đóng COMPLETED sau khi khách thanh toán đủ.";
+
+        return new SettleContractResponse(
+            contract.Id,
+            contract.ContractCode,
+            EnumName.ToDatabaseValue(contract.Status),
+            newlyOffset,
+            newlyRefunded,
+            availableDeposit,
+            remainingDebt,
+            isCompleted,
+            resultMsg);
+    }
+
+    private async Task<int> CountOutstandingEquipmentsForContractAsync(Guid contractId, CancellationToken ct)
+    {
+        return await (
+            from note in db.HandoverNotes.AsNoTracking()
+            join item in db.HandoverItems.AsNoTracking() on note.Id equals item.HandoverNoteId
+            join eq in db.Equipments.AsNoTracking() on item.EquipmentId equals eq.Id
+            where note.RentalContractId == contractId
+                  && note.Status == HandoverNoteStatus.Completed
+                  && eq.Status == EquipmentStatus.Rented
+                  && !(from ret in db.EquipmentReturns
+                       join ri in db.EquipmentReturnItems on ret.Id equals ri.EquipmentReturnId
+                       where ret.RentalContractId == contractId
+                             && ret.Status != EquipmentReturnStatus.Cancelled
+                             && ri.EquipmentId == eq.Id
+                       select ri.Id).Any()
+            select eq.Id
+        ).Distinct().CountAsync(ct);
+    }
+
+    private async Task<List<SettlementChargeItemDto>> GetUnpaidSettlementItemsAsync(
+        RentalContract contract,
+        CancellationToken ct)
+    {
+        var rentalCharges = await db.RentalCharges.AsNoTracking()
+            .Where(rc => rc.RentalContractId == contract.Id
+                         && (rc.Status == RentalChargeStatus.Unpaid || rc.Status == RentalChargeStatus.PartiallyPaid)
+                         && rc.Amount > rc.PaidAmount)
+            .OrderBy(rc => rc.ChargeType == "RENTAL" ? 1 : 0)
+            .ThenBy(rc => rc.DueDate ?? DateOnly.MaxValue)
+            .ToListAsync(ct);
+
+        var result = rentalCharges.Select(rc => new SettlementChargeItemDto(
+            rc.Id,
+            "RENTAL_CHARGE",
+            rc.ChargeType,
+            rc.Description ?? rc.ChargeType,
+            rc.Amount,
+            rc.PaidAmount,
+            Math.Max(0m, rc.Amount - rc.PaidAmount),
+            EnumName.ToDatabaseValue(rc.Status),
+            rc.DueDate)).ToList();
+
+        var linkedRcIds = rentalCharges.Select(r => r.Id).ToHashSet();
+        var eqIdsOfContract = await (
+            from hn in db.HandoverNotes.AsNoTracking()
+            join hi in db.HandoverItems.AsNoTracking() on hn.Id equals hi.HandoverNoteId
+            where hn.RentalContractId == contract.Id
+            select hi.EquipmentId
+        ).Distinct().ToListAsync(ct);
+
+        if (eqIdsOfContract.Count > 0)
+        {
+            var standaloneIcs = await (
+                from ic in db.IncidentCharges.AsNoTracking()
+                join ii in db.EquipmentIncidentItems.AsNoTracking() on ic.IncidentItemId equals ii.Id
+                join inc in db.EquipmentIncidents.AsNoTracking() on ii.IncidentId equals inc.Id
+                where ic.Status == IncidentChargeStatus.Pending
+                      && (ic.RentalChargeId == null || !linkedRcIds.Contains(ic.RentalChargeId.Value))
+                      && inc.CompanyId == contract.CompanyId
+                      && eqIdsOfContract.Contains(ii.EquipmentId)
+                select new { ic, inc.IncidentCode }
+            ).ToListAsync(ct);
+
+            foreach (var row in standaloneIcs)
+            {
+                var rem = Math.Max(0m, row.ic.Amount - row.ic.DepositOffsetAmount);
+                if (rem <= 0) continue;
+                result.Add(new SettlementChargeItemDto(
+                    row.ic.Id,
+                    "INCIDENT_CHARGE",
+                    row.ic.ChargeType,
+                    row.ic.Description ?? $"Phí sự cố {row.IncidentCode}",
+                    row.ic.Amount,
+                    row.ic.DepositOffsetAmount,
+                    rem,
+                    EnumName.ToDatabaseValue(row.ic.Status),
+                    null));
+            }
+        }
+
+        return result;
+    }
+
 }

@@ -207,21 +207,28 @@ public sealed class ContractPdfGenerator(IOptions<LessorOptions> options)
                 : ".");
             t.Span(" Giá trên chưa bao gồm thuế giá trị gia tăng (nếu có).");
         });
+        var depositDeadline = data.StartDate.AddDays(-2);
         col.Item().Text(t =>
         {
             t.Justify();
-            t.Span($"{article}.2. Tiền đặt cọc: ");
+            t.Span($"{article}.2. Tiền đặt cọc và thời hạn đặt cọc: ");
             t.Span($"{Money(data.DepositAmount)} đồng").Bold();
             t.Span($" (Bằng chữ: {VietnameseMoneyWords.ToWords(data.DepositAmount)})").Italic();
-            t.Span(". Bên B đặt cọc trong vòng 03 ngày làm việc kể từ ngày ký và trước khi Bên A giao thiết bị. " +
-                   "Tiền cọc được trừ vào tiền thuê khi thanh lý hợp đồng, hoặc hoàn lại cho Bên B sau khi trừ " +
-                   "các khoản phí phát sinh (nếu có).");
+            t.Span($". Sau khi bản hợp đồng đã ký được Bên A kiểm tra và phê duyệt, Bên B có nghĩa vụ hoàn tất tiền đặt cọc ");
+            t.Span($"trước ngày {depositDeadline:dd/MM/yyyy}").Bold();
+            t.Span($" (tối thiểu 02 ngày trước ngày bắt đầu thuê {data.StartDate:dd/MM/yyyy}). ");
+            t.Span("Trường hợp đến thời điểm nêu trên mà Bên A chưa nhận đủ tiền đặt cọc (qua cổng thanh toán VNPAY hoặc phiếu thu trực tiếp được Bên A xác nhận), " +
+                   "hợp đồng này sẽ tự động chấm dứt/hủy bỏ mà không cần thông báo thêm và Bên A có quyền giải phóng thiết bị để phục vụ khách hàng khác. ");
+            t.Span("Tiền cọc được trừ vào tiền thuê khi thanh lý hợp đồng, hoặc hoàn lại cho Bên B sau khi trừ các khoản phí phát sinh (nếu có).");
         });
         Clause(col, $"{article}.3", data.RentalType == "LONG_TERM"
-            ? "Bên B thanh toán tiền thuê theo từng tháng, chậm nhất ngày 05 của tháng kế tiếp. Phần còn lại " +
-              "(nếu có) được thanh toán trong vòng 07 ngày kể từ ngày hai bên ký biên bản trả thiết bị."
-            : "Phần còn lại sau khi trừ tiền cọc được thanh toán trong vòng 07 ngày kể từ ngày hai bên ký " +
-              "biên bản trả thiết bị.");
+            ? "Đối với hợp đồng dài hạn, tiền thuê được chia theo từng chu kỳ 30 ngày (phí vận chuyển gộp vào đợt 1). " +
+              "Bên B thanh toán tiền thuê đầu mỗi kỳ trong vòng 05 ngày kể từ ngày bắt đầu chu kỳ đó. " +
+              "Trường hợp chậm thanh toán sau ngày đến hạn, Bên B chịu lãi/phạt chậm thanh toán 0,05%/ngày trên số tiền quá hạn " +
+              "(tối đa không quá 8% giá trị đợt chậm thanh toán theo quy định pháp luật)."
+            : "Bên B thanh toán toàn bộ tiền thuê và phí vận chuyển (nếu có) chậm nhất trong vòng 07 ngày kể từ ngày kết thúc " +
+              "thời hạn thuê hoặc tại thời điểm bàn giao/thanh lý hợp đồng. Trường hợp chậm thanh toán sau ngày đến hạn, " +
+              "Bên B chịu phạt chậm thanh toán 0,05%/ngày trên số tiền quá hạn (tối đa 8% giá trị khoản chậm nộp).");
         Clause(col, $"{article}.4",
             "Hình thức thanh toán: chuyển khoản vào tài khoản của Bên A nêu trên, hoặc tiền mặt có phiếu thu của Bên A.");
 
@@ -246,16 +253,21 @@ public sealed class ContractPdfGenerator(IOptions<LessorOptions> options)
                     "trừ hao mòn tự nhiên.");
 
         // Điều 7. Hư hỏng, mất mát, trễ hạn
-        Article(col, ++article, "Hư hỏng, mất mát và trả thiết bị trễ hạn");
+        Article(col, ++article, "Hư hỏng, mất mát, trả thiết bị trễ hạn và công nợ");
         Bullet(col, "Thiết bị hư hỏng, mất mát do lỗi của Bên B thì Bên B chịu chi phí sửa chữa hoặc bồi thường theo " +
-                    "giá trị thiết bị tại thời điểm xảy ra, căn cứ biên bản xác nhận của hai bên.");
-        Bullet(col, "Trả thiết bị trễ hạn mà không có phụ lục gia hạn thì Bên B trả thêm tiền thuê cho thời gian trễ " +
-                    "theo đơn giá tại Điều 1.");
-        Bullet(col, "Các khoản phí phát sinh được trừ vào tiền cọc; nếu tiền cọc không đủ, Bên B thanh toán phần chênh lệch.");
+                    "biên bản kiểm tra của Bên A. Trường hợp chi phí vượt quá số tiền đặt cọc còn lại, Bên B phải thanh toán " +
+                    "dứt điểm phần chênh lệch trước khi Bên A bàn giao thiết bị thay thế.");
+        Bullet(col, "Trả thiết bị trễ hạn so với ngày kết thúc hợp đồng mà không có phụ lục gia hạn thì Bên B chịu phí trả trễ " +
+                    "bằng 150% đơn giá thuê ngày (hợp đồng tháng quy đổi bằng đơn giá tháng chia 30) nhân với số ngày trễ thực tế.");
+        Bullet(col, "Mọi khoản tiền thuê còn thiếu, phạt chậm thanh toán, phí trả trễ và bồi thường hư hỏng/mất mát được ưu tiên " +
+                    "cấn trừ trực tiếp vào tiền đặt cọc khi quyết toán; nếu còn dư Bên A hoàn lại cho Bên B, nếu thiếu Bên B có nghĩa vụ thanh toán phần chênh lệch.");
+        Bullet(col, "Bên A có quyền từ chối lập phiếu giữ chỗ hoặc ký hợp đồng thuê mới cho tới khi Bên B hoàn tất toàn bộ " +
+                    "các khoản công nợ quá hạn và phí phạt phát sinh của hợp đồng trước đó.");
 
         // Điều 8. Chấm dứt
         Article(col, ++article, "Chấm dứt hợp đồng");
         col.Item().Text("Hợp đồng chấm dứt trong các trường hợp sau:");
+        Bullet(col, $"Hợp đồng tự động hủy bỏ nếu Bên B không hoàn tất đủ tiền đặt cọc trước ngày {depositDeadline:dd/MM/yyyy} (02 ngày trước ngày bắt đầu thuê {data.StartDate:dd/MM/yyyy}).");
         Bullet(col, "Hết thời hạn thuê và hai bên đã hoàn tất việc trả thiết bị, thanh toán.");
         Bullet(col, "Hai bên thỏa thuận chấm dứt trước thời hạn.");
         Bullet(col, "Một bên đơn phương chấm dứt khi bên kia vi phạm nghiêm trọng nghĩa vụ (Bên B chậm thanh toán quá " +

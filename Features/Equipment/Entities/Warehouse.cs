@@ -34,6 +34,12 @@ public class Warehouse
     [Required]
     public WarehouseStatus Status { get; set; }
 
+    [Column("latitude")]
+    public double? Latitude { get; set; }
+
+    [Column("longitude")]
+    public double? Longitude { get; set; }
+
     [Column("created_at", TypeName = "timestamp with time zone")]
     public DateTimeOffset CreatedAt { get; set; }
 

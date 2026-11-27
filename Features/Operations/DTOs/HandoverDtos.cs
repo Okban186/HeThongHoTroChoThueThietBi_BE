@@ -2,7 +2,6 @@ using System.ComponentModel.DataAnnotations;
 
 namespace HeThongHoTroChoThueThietBi.Features.Operations.DTOs;
 
-/// <summary>Hợp đồng cần kho soạn bàn giao (đã ký, chưa giao đủ máy).</summary>
 public sealed record HandoverContractResponse(
     Guid ContractId,
     string ContractCode,
@@ -10,21 +9,21 @@ public sealed record HandoverContractResponse(
     string CompanyName,
     DateOnly StartDate,
     DateOnly EndDate,
-    // SIGNED, PREPARING, PARTIALLY_DELIVERED
     string ContractStatus,
     string? DeliveryAddress,
-    // Tổng số máy theo hợp đồng.
     int TotalQuantity,
-    // Số máy đã được xếp vào phiếu bàn giao (trừ phiếu đã hủy).
     int AllocatedQuantity,
-    int ActiveNoteCount
+    int ActiveNoteCount,
+    int PendingDefectiveReturnCount = 0,
+    string? PendingDefectiveReturnCode = null,
+    Guid? ReadyIncidentReplacementId = null,
+    string? ReadyIncidentCode = null,
+    string? BlockedIncidentReplacementReason = null
 );
 
-/// <summary>Chi tiết chuẩn bị của một hợp đồng: số lượng từng model, các phiếu đã soạn.</summary>
 public sealed record HandoverContractDetailResponse(
     HandoverContractResponse Contract,
     string? DeliveryNote,
-    // Người đại diện ký hợp đồng, dùng làm người nhận mặc định.
     string? RepresentativeName,
     string? RepresentativePhone,
     List<HandoverContractItemResponse> Items,
@@ -38,19 +37,31 @@ public sealed record HandoverContractItemResponse(
     string Unit,
     int Quantity,
     int AllocatedQuantity,
-    // Số máy trong kho đang sẵn sàng (AVAILABLE, không hỏng) để chọn.
     int AvailableInStock
 );
 
-/// <summary>Máy sẵn sàng trong kho để chọn vào phiếu bàn giao.</summary>
 public sealed record AvailableEquipmentResponse(
     Guid Id,
     string SerialNumber,
     Guid EquipmentModelId,
     Guid WarehouseId,
     string WarehouseName,
-    // GOOD, FAIR
     string Condition
+);
+
+public sealed record LookupSerialResponse(
+    Guid EquipmentId,
+    string SerialNumber,
+    Guid EquipmentModelId,
+    string ModelCode,
+    string ModelName,
+    Guid WarehouseId,
+    string WarehouseName,
+    string Condition,
+    string Status,
+    bool IsAvailableForHandover,
+    bool IsContractModel,
+    string? UnavailableReason
 );
 
 public sealed record HandoverNoteResponse(
@@ -63,12 +74,16 @@ public sealed record HandoverNoteResponse(
     string ReceivedByName,
     string? ReceivedByPhone,
     string? Note,
-    // PREPARING, PENDING_APPROVAL, SHIPPING, COMPLETED, CANCELLED
     string Status,
     int ItemCount,
     string? CreatedByName,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt
+    DateTimeOffset UpdatedAt,
+    string HandoverType = "INITIAL",
+    Guid? ParentHandoverId = null,
+    Guid? AssignedStorekeeperId = null,
+    string? AssignedStorekeeperName = null,
+    Guid? IncidentId = null
 );
 
 public sealed record HandoverNoteDetailResponse(
@@ -87,19 +102,22 @@ public sealed record HandoverItemResponse(
     string ModelName,
     string WarehouseName,
     string Condition,
-    // Trạng thái hiện tại của máy (RESERVED khi đang soạn, RENTED khi đã giao).
     string EquipmentStatus,
-    string? Note
+    string? Note,
+    Guid? ReplacedForModelId = null,
+    string? ReplacedForModelCode = null,
+    string? ReplacedForModelName = null
 );
 
-/// <summary>Tạo phiếu bàn giao (thủ kho chọn máy cụ thể theo serial).</summary>
 public sealed class CreateHandoverRequest : SaveHandoverRequest
 {
     [Required(ErrorMessage = "Vui lòng chọn hợp đồng.")]
     public Guid? RentalContractId { get; init; }
+
+    /// <summary>Truyền IncidentId khi lập phiếu bàn giao máy thay thế sự cố (INCIDENT_REPLACEMENT).</summary>
+    public Guid? IncidentId { get; init; }
 }
 
-/// <summary>Sửa phiếu khi còn đang soạn (PREPARING).</summary>
 public class SaveHandoverRequest
 {
     [Required(ErrorMessage = "Vui lòng chọn ngày giao.")]
@@ -126,6 +144,8 @@ public sealed class HandoverItemRequest
 
     [MaxLength(500)]
     public string? Note { get; init; }
+
+    public Guid? ReplacedForModelId { get; init; }
 }
 
 public sealed class CancelHandoverRequest
@@ -133,4 +153,27 @@ public sealed class CancelHandoverRequest
     [Required(ErrorMessage = "Vui lòng nhập lý do hủy.")]
     [MaxLength(500)]
     public string Reason { get; init; } = string.Empty;
+}
+
+
+public sealed class CompleteHandoverDeliveryRequest
+{
+    [MaxLength(1000)]
+    public string? Note { get; init; }
+
+    /// <summary>Danh sách máy bị lỗi ngay lúc giao/lắp đặt cần mang về kho bảo dưỡng và giao bù.</summary>
+    public List<DefectiveDeliveryItemRequest> DefectiveItems { get; init; } = [];
+}
+
+public sealed class DefectiveDeliveryItemRequest
+{
+    [Required]
+    public Guid? EquipmentId { get; init; }
+
+    /// <summary>VD: DAMAGED_ON_DELIVERY, MISSING_ACCESSORY, TECHNICAL_FAULT.</summary>
+    [MaxLength(30)]
+    public string IssueType { get; init; } = "DAMAGED_ON_DELIVERY";
+
+    [MaxLength(500)]
+    public string? Description { get; init; }
 }

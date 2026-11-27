@@ -14,12 +14,19 @@ public sealed class CancelRentalContractRequest
 {
     [MaxLength(1000, ErrorMessage = "Lý do tối đa 1000 ký tự.")]
     public string? Reason { get; init; }
+
+    /// <summary>Phí phạt hủy hợp đồng trước hạn (nếu có).</summary>
+    [Range(0, double.MaxValue)]
+    public decimal? PenaltyAmount { get; init; }
+
+    /// <summary>Phí vận chuyển thực tế phải thu khi khách hủy (thu hồi ưu đãi miễn phí vận chuyển nếu có).</summary>
+    [Range(0, double.MaxValue)]
+    public decimal? TransportFeeAmount { get; init; }
 }
 
 /// <summary>Sales tải lên bản hợp đồng đã ký (PENDING_SIGNATURE → SIGNED).</summary>
 public sealed class MarkRentalContractSignedRequest
 {
-    // storage_files.id của file PDF hợp đồng đã ký (upload qua signed-upload-ticket + confirm-upload).
     [Required(ErrorMessage = "Vui lòng tải lên bản hợp đồng đã ký.")]
     public Guid? ContractFileId { get; init; }
 }

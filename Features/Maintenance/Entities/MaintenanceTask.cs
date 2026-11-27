@@ -18,6 +18,10 @@ public class MaintenanceTask
     [Column("service_assignment_id")]
     public Guid? ServiceAssignmentId { get; set; }
 
+    /// <summary>KTV (StaffId) đã tiếp nhận hoặc được Manager chỉ định phụ trách phiếu này (NULL = chưa ai nhận).</summary>
+    [Column("assigned_technician_staff_id")]
+    public Guid? AssignedTechnicianStaffId { get; set; }
+
     [Column("type")]
     [MaxLength(20)]
     [Required]

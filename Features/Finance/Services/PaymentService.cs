@@ -5,12 +5,14 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Customer.Services;
 using HeThongHoTroChoThueThietBi.Features.Finance.Configurations;
 using HeThongHoTroChoThueThietBi.Features.Finance.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Finance.Entities;
 using HeThongHoTroChoThueThietBi.Features.Finance.Enums;
+using HeThongHoTroChoThueThietBi.Features.Operations.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.Entities;
 using HeThongHoTroChoThueThietBi.Features.Rental.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.Services;
@@ -37,6 +39,7 @@ public sealed class PaymentService(
     IOptions<VnpayOptions> vnpayOptions,
     IFileUploadService uploadService,
     CustomerPortalService customerPortalService,
+    INotificationDispatcher notificationDispatcher,
     ILogger<PaymentService> logger)
 {
     private readonly VnpayOptions _vnpay = vnpayOptions.Value;
@@ -54,7 +57,7 @@ public sealed class PaymentService(
 
     private static readonly RentalContractStatus[] PayableContractStatuses =
     [
-        RentalContractStatus.Signed,
+        RentalContractStatus.PendingDeposit,
         RentalContractStatus.Preparing,
         RentalContractStatus.PartiallyDelivered,
         RentalContractStatus.Delivered,
@@ -65,6 +68,113 @@ public sealed class PaymentService(
 
     // ================================================================ tổng quan tài chính hợp đồng
 
+    /// <summary>
+    /// Đảm bảo mọi hợp đồng đã ký (Signed trở đi) đều có sẵn các dòng tiền thuê (charge_type = 'RENTAL') trong rental_charges:
+    /// - SHORT_TERM: 1 khoản duy nhất (100% tiền thuê hợp đồng + phí vận chuyển nếu có).
+    /// - LONG_TERM: chia theo chu kỳ 30 ngày/đợt (đợt 1 gộp phí vận chuyển nếu có).
+    /// Khắc phục trường hợp hợp đồng cũ hoặc được tạo trước khi bật tính năng thanh toán chỉ hiện tiền cọc.
+    /// </summary>
+    public async Task EnsureRentalChargesGeneratedAsync(
+        RentalContract contract,
+        Guid actorUserId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!PayableContractStatuses.Contains(contract.Status))
+            return;
+
+        var hasRentalCharge = await db.RentalCharges.AsNoTracking()
+            .AnyAsync(c => c.RentalContractId == contract.Id
+                           && c.ChargeType == "RENTAL"
+                           && c.Status != RentalChargeStatus.Cancelled, cancellationToken);
+        if (hasRentalCharge)
+            return;
+
+        var days = RentalPricing.RentalDays(contract.StartDate, contract.EndDate);
+        var items = await db.RentalContractItems.AsNoTracking()
+            .Where(i => i.RentalContractId == contract.Id)
+            .ToListAsync(cancellationToken);
+
+        var shippingFee = await db.RentalContractServices.AsNoTracking()
+            .Where(s => s.RentalContractId == contract.Id && s.ProvidedBy == "RENTAL_COMPANY")
+            .SumAsync(s => (decimal?)s.Amount, cancellationToken) ?? 0m;
+
+        var itemsTotal = items.Sum(i => i.Quantity * i.AgreedUnitPrice * RentalPricing.BillableUnits(i.BillingUnit, days));
+        var now = DateTimeOffset.UtcNow;
+        var creatorId = contract.CreatedBy != Guid.Empty ? contract.CreatedBy : actorUserId;
+
+        if (string.Equals(contract.RentalType, "SHORT_TERM", StringComparison.OrdinalIgnoreCase))
+        {
+            var amount = itemsTotal + shippingFee;
+            db.RentalCharges.Add(new RentalCharge
+            {
+                Id = Guid.CreateVersion7(),
+                SourceType = "CONTRACT",
+                RentalContractId = contract.Id,
+                ChargeType = "RENTAL",
+                Description = shippingFee > 0
+                    ? $"Thanh toán hợp đồng ngắn hạn ({days} ngày) + Phí vận chuyển"
+                    : $"Thanh toán hợp đồng ngắn hạn ({days} ngày)",
+                Quantity = 1,
+                UnitPrice = amount,
+                Amount = amount,
+                PeriodStart = contract.StartDate,
+                PeriodEnd = contract.EndDate,
+                DueDate = contract.EndDate.AddDays(7),
+                PaidAmount = 0,
+                Status = RentalChargeStatus.Unpaid,
+                CreatedBy = creatorId,
+                CreatedAt = now,
+                Note = shippingFee > 0 ? $"Đã gộp phí vận chuyển {shippingFee:N0} đ" : null,
+            });
+        }
+        else
+        {
+            var totalMonths = Math.Max(1, RentalPricing.BillableUnits("MONTHLY", days));
+            var baseMonthlyAmount = Math.Floor(itemsTotal / totalMonths);
+
+            for (var i = 0; i < totalMonths; i++)
+            {
+                var installmentNo = i + 1;
+                var periodStart = contract.StartDate.AddDays(i * 30);
+                var periodEnd = installmentNo == totalMonths
+                    ? contract.EndDate
+                    : contract.StartDate.AddDays(installmentNo * 30 - 1);
+
+                var rentPart = installmentNo == totalMonths
+                    ? itemsTotal - baseMonthlyAmount * (totalMonths - 1)
+                    : baseMonthlyAmount;
+
+                var shippingPart = installmentNo == 1 ? shippingFee : 0m;
+                var amount = rentPart + shippingPart;
+                var dueDate = periodStart.AddDays(5);
+
+                db.RentalCharges.Add(new RentalCharge
+                {
+                    Id = Guid.CreateVersion7(),
+                    SourceType = "CONTRACT",
+                    RentalContractId = contract.Id,
+                    ChargeType = "RENTAL",
+                    Description = shippingPart > 0
+                        ? $"Tiền thuê đợt {installmentNo}/{totalMonths} (gồm phí vận chuyển)"
+                        : $"Tiền thuê đợt {installmentNo}/{totalMonths}",
+                    Quantity = 1,
+                    UnitPrice = amount,
+                    Amount = amount,
+                    PeriodStart = periodStart,
+                    PeriodEnd = periodEnd,
+                    DueDate = dueDate,
+                    PaidAmount = 0,
+                    Status = RentalChargeStatus.Unpaid,
+                    CreatedBy = creatorId,
+                    CreatedAt = now,
+                    Note = shippingPart > 0 ? $"Gồm tiền thuê {rentPart:N0} đ + phí vận chuyển {shippingPart:N0} đ" : null,
+                });
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     public async Task<ContractBillingSummaryResponse> GetContractBillingAsync(
         Guid contractId,
         Guid currentUserId,
@@ -73,6 +183,7 @@ public sealed class PaymentService(
         CancellationToken cancellationToken = default)
     {
         var contract = await EnsureContractAccessAsync(contractId, currentUserId, isCustomer, canViewAll, cancellationToken);
+        await EnsureRentalChargesGeneratedAsync(contract, currentUserId, cancellationToken);
         await ExpireTimedOutTransactionsAsync(contractId, cancellationToken);
 
         var days = RentalPricing.RentalDays(contract.StartDate, contract.EndDate);
@@ -164,6 +275,7 @@ public sealed class PaymentService(
             join inc in db.EquipmentIncidents.AsNoTracking() on ii.IncidentId equals inc.Id
             join eq in db.Equipments.AsNoTracking() on ii.EquipmentId equals eq.Id
             where ic.Status != IncidentChargeStatus.Cancelled &&
+                  ic.Status != IncidentChargeStatus.PendingApproval &&
                   ((ic.RentalChargeId.HasValue && penaltyRentalChargeIds.Contains(ic.RentalChargeId.Value)) ||
                    (inc.CompanyId == contract.CompanyId && contractEquipmentIds.Contains(ii.EquipmentId)))
             orderby ic.CreatedAt descending
@@ -293,6 +405,7 @@ public sealed class PaymentService(
         bool canViewAll,
         string clientIp,
         string fallbackReturnUrl,
+        bool isTechnicianOnly = false,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(_vnpay.TmnCode) || string.IsNullOrWhiteSpace(_vnpay.HashSecret))
@@ -305,13 +418,19 @@ public sealed class PaymentService(
 
         var contractId = request.RentalContractId!.Value;
         var contract = await EnsureContractAccessAsync(contractId, currentUserId, isCustomer, canViewAll, cancellationToken);
+        await EnsureRentalChargesGeneratedAsync(contract, currentUserId, cancellationToken);
 
         if (!PayableContractStatuses.Contains(contract.Status))
         {
             throw new AppException(
                 "CONTRACT_NOT_PAYABLE",
-                "Chỉ hợp đồng đã ký mới có thể tạo giao dịch thanh toán.",
+                "Hợp đồng cần được Quản lý duyệt bản PDF đã ký (chuyển sang Chờ đặt cọc) mới có thể thanh toán.",
                 StatusCodes.Status409Conflict);
+        }
+
+        if (isTechnicianOnly)
+        {
+            await EnsureTechnicianCanCollectPaymentAsync(contract.Id, currentUserId, cancellationToken);
         }
 
         var targetType = ParseTargetType(request.TargetType);
@@ -323,8 +442,11 @@ public sealed class PaymentService(
 
         var now = DateTimeOffset.UtcNow;
 
-        // Đóng các mã VNPAY PENDING cũ của cùng mục thanh toán trước khi sinh mã mới.
-        var oldPending = await db.PaymentTransactions
+        // Kiểm tra các giao dịch VNPAY PENDING cũ của cùng mục thanh toán:
+        // - Nếu đã hết hạn (ExpiresAt <= now) -> chuyển EXPIRED.
+        // - Nếu VẪN CÒN HẠN và đúng số tiền cần thu -> TÁI SỬ DỤNG luôn giao dịch cũ (không tự hủy khi người dùng nhấn ra ngoài)!
+        // - Chỉ sinh giao dịch mới khi không còn giao dịch nào đang chạy (hoặc người dùng đã tự bấm Hủy / số tiền thay đổi).
+        var existingPending = await db.PaymentTransactions
             .Where(t =>
                 t.RentalContractId == contract.Id &&
                 t.PaymentMethod == PaymentMethod.Vnpay &&
@@ -332,14 +454,42 @@ public sealed class PaymentService(
                 t.TargetType == targetType &&
                 t.RentalChargeId == resolved.RentalChargeId &&
                 t.IncidentChargeId == resolved.IncidentChargeId)
+            .OrderByDescending(t => t.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        foreach (var old in oldPending)
+        PaymentTransaction? reusable = null;
+        var mutatedOld = false;
+
+        foreach (var old in existingPending)
         {
-            old.Status = old.ExpiresAt.HasValue && old.ExpiresAt.Value <= now
-                ? PaymentTransactionStatus.Expired
-                : PaymentTransactionStatus.Cancelled;
-            old.UpdatedAt = now;
+            if (old.ExpiresAt.HasValue && old.ExpiresAt.Value <= now)
+            {
+                old.Status = PaymentTransactionStatus.Expired;
+                old.UpdatedAt = now;
+                mutatedOld = true;
+            }
+            else if (reusable is null
+                     && old.Amount == resolved.RemainingAmount
+                     && !string.IsNullOrWhiteSpace(old.PaymentUrl))
+            {
+                reusable = old;
+            }
+            else
+            {
+                old.Status = PaymentTransactionStatus.Cancelled;
+                old.UpdatedAt = now;
+                mutatedOld = true;
+            }
+        }
+
+        if (reusable is not null)
+        {
+            if (mutatedOld)
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            await tx.CommitAsync(cancellationToken);
+            return (await ToTransactionResponsesAsync([reusable], contract.ContractCode, cancellationToken)).Single();
         }
 
         var expireMinutes = _vnpay.ExpireMinutes > 0 ? _vnpay.ExpireMinutes : 15;
@@ -521,9 +671,14 @@ public sealed class PaymentService(
             txn.Status = PaymentTransactionStatus.Verified;
             txn.VerifiedAt = now;
 
-            await ApplyVerifiedPaymentAsync(txn, now, cancellationToken);
+            var movedToPreparing = await ApplyVerifiedPaymentAsync(txn, now, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
             await dbTx.CommitAsync(cancellationToken);
+
+            if (movedToPreparing)
+            {
+                await NotifyDepositCompletedAndPreparingAsync(txn.RentalContractId, txn.TxnRef, cancellationToken);
+            }
 
             return new VnpayCallbackResult("00", "Confirm Success", true, false, txnRef, txn.Amount, txn.OrderInfo);
         }
@@ -562,28 +717,40 @@ public sealed class PaymentService(
         CreateCashPaymentRequest request,
         Guid currentUserId,
         bool canViewAll,
+        bool isTechnicianOnly = false,
         CancellationToken cancellationToken = default)
     {
         var contract = await EnsureContractAccessAsync(
             request.RentalContractId!.Value, currentUserId, isCustomer: false, canViewAll, cancellationToken);
+        await EnsureRentalChargesGeneratedAsync(contract, currentUserId, cancellationToken);
 
         if (!PayableContractStatuses.Contains(contract.Status))
         {
-            throw new AppException("CONTRACT_NOT_PAYABLE", "Hợp đồng chưa ở trạng thái cho phép thu tiền.", StatusCodes.Status409Conflict);
+            throw new AppException("CONTRACT_NOT_PAYABLE", "Hợp đồng cần được Quản lý duyệt bản PDF đã ký (chuyển sang Chờ đặt cọc) mới có thể thu tiền.", StatusCodes.Status409Conflict);
         }
 
-        var receiptFile = await db.StorageFiles
-            .AsNoTracking()
-            .SingleOrDefaultAsync(f => f.Id == request.ReceiptFileId!.Value, cancellationToken);
-
-        if (receiptFile is null || receiptFile.UploadedBy != currentUserId ||
-            !CashReceiptFormats.Contains((receiptFile.ContentType ?? "").ToLowerInvariant()))
+        if (isTechnicianOnly)
         {
-            throw new AppException(
-                "RECEIPT_FILE_INVALID",
-                "Ảnh phiếu thu không hợp lệ hoặc không phải do bạn tải lên.",
-                StatusCodes.Status400BadRequest,
-                "receiptFileId");
+            await EnsureTechnicianCanCollectPaymentAsync(contract.Id, currentUserId, cancellationToken);
+        }
+
+        Guid? validatedReceiptFileId = null;
+        if (request.ReceiptFileId.HasValue)
+        {
+            var receiptFile = await db.StorageFiles
+                .AsNoTracking()
+                .SingleOrDefaultAsync(f => f.Id == request.ReceiptFileId.Value, cancellationToken);
+
+            if (receiptFile is null || receiptFile.UploadedBy != currentUserId ||
+                !CashReceiptFormats.Contains((receiptFile.ContentType ?? "").ToLowerInvariant()))
+            {
+                throw new AppException(
+                    "RECEIPT_FILE_INVALID",
+                    "Ảnh phiếu thu không hợp lệ hoặc không phải do bạn tải lên.",
+                    StatusCodes.Status400BadRequest,
+                    "receiptFileId");
+            }
+            validatedReceiptFileId = receiptFile.Id;
         }
 
         var targetType = ParseTargetType(request.TargetType);
@@ -612,7 +779,7 @@ public sealed class PaymentService(
             Amount = request.Amount,
             OrderInfo = resolved.OrderInfo,
             Status = PaymentTransactionStatus.Pending,
-            ReceiptFileId = receiptFile.Id,
+            ReceiptFileId = validatedReceiptFileId,
             CreatedBy = currentUserId,
             Note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim(),
             CreatedAt = now,
@@ -622,15 +789,51 @@ public sealed class PaymentService(
         db.PaymentTransactions.Add(entity);
         await db.SaveChangesAsync(cancellationToken);
 
+        // Thông báo cho Manager biết có hóa đơn thu tiền mặt mới gắn nhân viên (Sales / KTV) đang chờ duyệt
+        var collectorName = await db.Users.AsNoTracking()
+            .Where(u => u.Id == currentUserId)
+            .Select(u => u.FullName)
+            .FirstOrDefaultAsync(cancellationToken) ?? "Nhân viên";
+
+        var managerIds = new List<Guid>();
+        if (contract.ApprovedBy.HasValue)
+        {
+            managerIds.Add(contract.ApprovedBy.Value);
+        }
+        else
+        {
+            managerIds.AddRange(await (
+                from ur in db.UserRoles.AsNoTracking()
+                join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+                where r.Code == "MANAGER"
+                select ur.UserId
+            ).Distinct().ToListAsync(cancellationToken));
+        }
+
+        if (managerIds.Count > 0)
+        {
+            var targetLabel = targetType == PaymentTargetType.Deposit ? "tiền đặt cọc" : "thanh toán";
+            await notificationDispatcher.NotifyUsersAsync(
+                managerIds.Distinct(),
+                $"Hóa đơn thu {targetLabel} chờ duyệt ({contract.ContractCode})",
+                $"{collectorName} đã xác nhận nhận trực tiếp {entity.Amount:N0} đ cho hợp đồng {contract.ContractCode} (Mã hóa đơn: {entity.TxnRef}). Vui lòng kiểm tra và duyệt hóa đơn.",
+                "CASH_PAYMENT_PENDING",
+                cancellationToken: cancellationToken);
+        }
+
         return (await ToTransactionResponsesAsync([entity], contract.ContractCode, cancellationToken)).Single();
     }
 
-    public async Task<List<PaymentTransactionResponse>> GetPendingCashPaymentsAsync(CancellationToken cancellationToken = default)
+    public async Task<List<PaymentTransactionResponse>> GetPendingCashPaymentsAsync(
+        Guid managerUserId,
+        CancellationToken cancellationToken = default)
     {
         var rows = await (
             from t in db.PaymentTransactions.AsNoTracking()
             join c in db.RentalContracts.AsNoTracking() on t.RentalContractId equals c.Id
-            where t.PaymentMethod == PaymentMethod.Cash && t.Status == PaymentTransactionStatus.Pending
+            where t.PaymentMethod == PaymentMethod.Cash
+                  && t.Status == PaymentTransactionStatus.Pending
+                  && c.ApprovedBy == managerUserId
             orderby t.CreatedAt
             select new { t, c.ContractCode }
         ).ToListAsync(cancellationToken);
@@ -666,20 +869,45 @@ public sealed class PaymentService(
             throw new AppException("PAYMENT_NOT_PENDING_CASH", "Chỉ duyệt được phiếu thu tiền mặt đang chờ xác nhận.", StatusCodes.Status409Conflict);
         }
 
+        var contractOwner = await db.RentalContracts.AsNoTracking()
+            .Where(c => c.Id == txn.RentalContractId)
+            .Select(c => new { c.Id, c.ContractCode, c.ApprovedBy })
+            .SingleAsync(cancellationToken);
+
+        if (contractOwner.ApprovedBy.HasValue && contractOwner.ApprovedBy.Value != managerUserId)
+        {
+            throw new AppException(
+                "FORBIDDEN_MANAGER",
+                $"Hợp đồng {contractOwner.ContractCode} do Quản lý khác phụ trách, bạn không có quyền duyệt hóa đơn thu tiền này.",
+                StatusCodes.Status403Forbidden);
+        }
+
         var now = DateTimeOffset.UtcNow;
         txn.Status = PaymentTransactionStatus.Verified;
         txn.VerifiedBy = managerUserId;
         txn.VerifiedAt = now;
         txn.UpdatedAt = now;
 
-        await ApplyVerifiedPaymentAsync(txn, now, cancellationToken);
+        var movedToPreparing = await ApplyVerifiedPaymentAsync(txn, now, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         await dbTx.CommitAsync(cancellationToken);
+
+        if (movedToPreparing)
+        {
+            await NotifyDepositCompletedAndPreparingAsync(txn.RentalContractId, txn.TxnRef, cancellationToken);
+        }
 
         var contractCode = await db.RentalContracts.AsNoTracking()
             .Where(c => c.Id == txn.RentalContractId)
             .Select(c => c.ContractCode)
             .SingleAsync(cancellationToken);
+
+        await notificationDispatcher.NotifyUsersAsync(
+            [txn.CreatedBy],
+            $"Đã duyệt hóa đơn {txn.TxnRef} ({contractCode})",
+            $"Quản lý đã duyệt hóa đơn thu trực tiếp {txn.TxnRef} ({txn.Amount:N0} đ) của hợp đồng {contractCode}.",
+            "CASH_PAYMENT_VERIFIED",
+            cancellationToken: cancellationToken);
 
         return (await ToTransactionResponsesAsync([txn], contractCode, cancellationToken)).Single();
     }
@@ -700,6 +928,19 @@ public sealed class PaymentService(
             throw new AppException("PAYMENT_NOT_PENDING_CASH", "Chỉ từ chối được phiếu thu tiền mặt đang chờ xác nhận.", StatusCodes.Status409Conflict);
         }
 
+        var contractOwner = await db.RentalContracts.AsNoTracking()
+            .Where(c => c.Id == txn.RentalContractId)
+            .Select(c => new { c.ContractCode, c.ApprovedBy })
+            .SingleAsync(cancellationToken);
+
+        if (contractOwner.ApprovedBy.HasValue && contractOwner.ApprovedBy.Value != managerUserId)
+        {
+            throw new AppException(
+                "FORBIDDEN_MANAGER",
+                $"Hợp đồng {contractOwner.ContractCode} do Quản lý khác phụ trách, bạn không có quyền từ chối hóa đơn thu tiền này.",
+                StatusCodes.Status403Forbidden);
+        }
+
         var now = DateTimeOffset.UtcNow;
         txn.Status = PaymentTransactionStatus.Failed;
         txn.VerifiedBy = managerUserId;
@@ -714,83 +955,208 @@ public sealed class PaymentService(
             .Select(c => c.ContractCode)
             .SingleAsync(cancellationToken);
 
+        await notificationDispatcher.NotifyUsersAsync(
+            [txn.CreatedBy],
+            $"Từ chối hóa đơn {txn.TxnRef} ({contractCode})",
+            $"Quản lý đã từ chối hóa đơn thu trực tiếp {txn.TxnRef} ({txn.Amount:N0} đ) của hợp đồng {contractCode}. Lý do: {txn.RejectedReason}",
+            "CASH_PAYMENT_REJECTED",
+            cancellationToken: cancellationToken);
+
         return (await ToTransactionResponsesAsync([txn], contractCode, cancellationToken)).Single();
     }
 
     // ================================================================ gạch nợ & helpers
 
-    private async Task ApplyVerifiedPaymentAsync(
+    /// <summary>Gạch nợ sau khi thanh toán thành công; trả về true nếu hợp đồng vừa đủ cọc và tự chuyển PENDING_DEPOSIT → PREPARING.</summary>
+    private async Task<bool> ApplyVerifiedPaymentAsync(
         PaymentTransaction txn,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        var movedToPreparing = false;
+
         switch (txn.TargetType)
         {
             case PaymentTargetType.Deposit:
-            {
-                await db.Database.ExecuteSqlInterpolatedAsync(
-                    $"SELECT 1 FROM rental_contracts WHERE id = {txn.RentalContractId} FOR UPDATE",
-                    cancellationToken);
+                {
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT 1 FROM rental_contracts WHERE id = {txn.RentalContractId} FOR UPDATE",
+                        cancellationToken);
 
-                var contract = await db.RentalContracts.SingleAsync(c => c.Id == txn.RentalContractId, cancellationToken);
-                contract.DepositPaidAmount += txn.Amount;
-                contract.UpdatedAt = now;
-                break;
-            }
+                    var contract = await db.RentalContracts.SingleAsync(c => c.Id == txn.RentalContractId, cancellationToken);
+                    contract.DepositPaidAmount += txn.Amount;
+                    contract.UpdatedAt = now;
+
+                    if (contract.Status == RentalContractStatus.PendingDeposit
+                        && contract.DepositPaidAmount >= contract.DepositRequiredAmount)
+                    {
+                        contract.Status = RentalContractStatus.Preparing;
+                        db.ContractStatusHistory.Add(new ContractStatusHistory
+                        {
+                            Id = Guid.CreateVersion7(),
+                            RentalContractId = contract.Id,
+                            PreviousStatus = RentalContractStatus.PendingDeposit,
+                            Status = RentalContractStatus.Preparing,
+                            ChangedBy = txn.VerifiedBy ?? txn.CreatedBy,
+                            ChangedAt = now,
+                            Note = $"Đã nhận đủ tiền đặt cọc ({txn.TxnRef}) — Tự động chuyển sang chuẩn bị thiết bị.",
+                        });
+                        movedToPreparing = true;
+                    }
+                    break;
+                }
 
             case PaymentTargetType.RentalInstallment:
             case PaymentTargetType.Charge:
-            {
-                var chargeId = txn.RentalChargeId!.Value;
-                await db.Database.ExecuteSqlInterpolatedAsync(
-                    $"SELECT 1 FROM rental_charges WHERE id = {chargeId} FOR UPDATE",
-                    cancellationToken);
-
-                var charge = await db.RentalCharges.SingleAsync(c => c.Id == chargeId, cancellationToken);
-                charge.PaidAmount = Math.Min(charge.Amount, charge.PaidAmount + txn.Amount);
-                if (charge.PaidAmount >= charge.Amount)
                 {
-                    charge.Status = RentalChargeStatus.Paid;
-                    charge.PaidAt = now;
+                    var chargeId = txn.RentalChargeId!.Value;
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT 1 FROM rental_charges WHERE id = {chargeId} FOR UPDATE",
+                        cancellationToken);
+
+                    var charge = await db.RentalCharges.SingleAsync(c => c.Id == chargeId, cancellationToken);
+                    charge.PaidAmount = Math.Min(charge.Amount, charge.PaidAmount + txn.Amount);
+                    if (charge.PaidAmount >= charge.Amount)
+                    {
+                        charge.Status = RentalChargeStatus.Paid;
+                        charge.PaidAt = now;
+                    }
+                    else
+                    {
+                        charge.Status = RentalChargeStatus.PartiallyPaid;
+                    }
+
+                    // Đồng bộ incident_charge liên kết CHỈ KHI khoản thu đã thanh toán đủ 100%
+                    if (charge.Status == RentalChargeStatus.Paid)
+                    {
+                        var linkedIncidentCharges = await db.IncidentCharges
+                            .Where(ic => ic.RentalChargeId == charge.Id && ic.Status == IncidentChargeStatus.Pending)
+                            .ToListAsync(cancellationToken);
+
+                        foreach (var ic in linkedIncidentCharges)
+                            ic.Status = IncidentChargeStatus.Charged;
+                    }
+
+                    break;
                 }
-                else
-                {
-                    charge.Status = RentalChargeStatus.PartiallyPaid;
-                }
-
-                // Đồng bộ incident_charge liên kết nếu có.
-                var linkedIncidentCharges = await db.IncidentCharges
-                    .Where(ic => ic.RentalChargeId == charge.Id && ic.Status == IncidentChargeStatus.Pending)
-                    .ToListAsync(cancellationToken);
-
-                foreach (var ic in linkedIncidentCharges)
-                    ic.Status = IncidentChargeStatus.Charged;
-
-                break;
-            }
 
             case PaymentTargetType.IncidentCharge:
-            {
-                if (txn.RentalChargeId.HasValue)
                 {
-                    var rc = await db.RentalCharges.SingleOrDefaultAsync(c => c.Id == txn.RentalChargeId.Value, cancellationToken);
-                    if (rc is not null)
+                    if (txn.RentalChargeId.HasValue)
                     {
-                        rc.PaidAmount = Math.Min(rc.Amount, rc.PaidAmount + txn.Amount);
-                        rc.Status = rc.PaidAmount >= rc.Amount ? RentalChargeStatus.Paid : RentalChargeStatus.PartiallyPaid;
-                        if (rc.Status == RentalChargeStatus.Paid)
-                            rc.PaidAt = now;
+                        var rc = await db.RentalCharges.SingleOrDefaultAsync(c => c.Id == txn.RentalChargeId.Value, cancellationToken);
+                        if (rc is not null)
+                        {
+                            rc.PaidAmount = Math.Min(rc.Amount, rc.PaidAmount + txn.Amount);
+                            rc.Status = rc.PaidAmount >= rc.Amount ? RentalChargeStatus.Paid : RentalChargeStatus.PartiallyPaid;
+                            if (rc.Status == RentalChargeStatus.Paid)
+                                rc.PaidAt = now;
+                        }
                     }
-                }
 
-                if (txn.IncidentChargeId.HasValue)
-                {
-                    var ic = await db.IncidentCharges.SingleOrDefaultAsync(x => x.Id == txn.IncidentChargeId.Value, cancellationToken);
-                    if (ic is not null)
-                        ic.Status = IncidentChargeStatus.Charged;
+                    if (txn.IncidentChargeId.HasValue)
+                    {
+                        var ic = await db.IncidentCharges.SingleOrDefaultAsync(x => x.Id == txn.IncidentChargeId.Value, cancellationToken);
+                        if (ic is not null)
+                        {
+                            var rcFullyPaid = !txn.RentalChargeId.HasValue || await db.RentalCharges
+                                .AnyAsync(c => c.Id == txn.RentalChargeId.Value && c.Status == RentalChargeStatus.Paid, cancellationToken);
+                            if (rcFullyPaid)
+                                ic.Status = IncidentChargeStatus.Charged;
+                        }
+                    }
+                    break;
                 }
-                break;
-            }
+        }
+
+        return movedToPreparing;
+    }
+
+    private async Task NotifyDepositCompletedAndPreparingAsync(
+        Guid contractId,
+        string txnRef,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var contract = await db.RentalContracts.AsNoTracking()
+                .SingleOrDefaultAsync(c => c.Id == contractId, cancellationToken);
+            if (contract is null) return;
+
+            var msg = $"Hợp đồng {contract.ContractCode} đã hoàn tất tiền đặt cọc ({txnRef}) và tự động chuyển sang trạng thái Chuẩn bị giao hàng (PREPARING).";
+
+            await notificationDispatcher.NotifyCompanyAsync(
+                contract.CompanyId,
+                $"Đã nhận đủ cọc — Bắt đầu chuẩn bị ({contract.ContractCode})",
+                msg,
+                "CONTRACT_DEPOSIT_COMPLETED",
+                cancellationToken: cancellationToken);
+
+            var recipients = new List<Guid> { contract.CreatedBy };
+            if (contract.ApprovedBy.HasValue) recipients.Add(contract.ApprovedBy.Value);
+
+            var storekeeperIds = await (
+                from ur in db.UserRoles.AsNoTracking()
+                join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+                where r.Code == "LEAD_STOREKEEPER" || r.Code == "STOREKEEPER"
+                select ur.UserId
+            ).Distinct().ToListAsync(cancellationToken);
+            recipients.AddRange(storekeeperIds);
+
+            await notificationDispatcher.NotifyUsersAsync(
+                recipients.Distinct(),
+                $"Hợp đồng {contract.ContractCode} đã đủ cọc — Sẵn sàng soạn kho",
+                msg,
+                "CONTRACT_DEPOSIT_COMPLETED",
+                cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Không gửi được thông báo hoàn tất cọc cho hợp đồng {ContractId}.", contractId);
+        }
+    }
+
+    /// <summary>
+    /// Ràng buộc thu tiền phía Kỹ thuật viên:
+    /// Chỉ KTV trưởng (LEADER) mới được tạo mã QR / nhận tiền mặt KHI VÀ CHỈ KHI phiếu bàn giao của hợp đồng
+    /// đã được Quản lý duyệt xuất kho (SHIPPING) và chuyến giao đã xuất phát (IN_PROGRESS), hoặc đã bàn giao xong (COMPLETED).
+    /// </summary>
+    private async Task EnsureTechnicianCanCollectPaymentAsync(
+        Guid contractId,
+        Guid currentUserId,
+        CancellationToken cancellationToken)
+    {
+        var staffId = await db.Staff.AsNoTracking()
+            .Where(s => s.UserId == currentUserId)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (!staffId.HasValue)
+        {
+            throw new AppException(
+                "FORBIDDEN_TECHNICIAN_PAYMENT",
+                "Tài khoản không có hồ sơ kỹ thuật viên hợp lệ.",
+                StatusCodes.Status403Forbidden);
+        }
+
+        var canCollect = await (
+            from hn in db.HandoverNotes.AsNoTracking()
+            join sa in db.ServiceAssignments.AsNoTracking() on hn.ServiceAssignmentId equals sa.Id
+            join m in db.ServiceAssignmentMembers.AsNoTracking() on sa.Id equals m.ServiceAssignmentId
+            where hn.RentalContractId == contractId
+                  && m.StaffId == staffId.Value
+                  && m.Role == "LEADER"
+                  && ((hn.Status == HandoverNoteStatus.Shipping && sa.Status == ServiceAssignmentStatus.InProgress)
+                      || hn.Status == HandoverNoteStatus.Completed)
+            select hn.Id
+        ).AnyAsync(cancellationToken);
+
+        if (!canCollect)
+        {
+            throw new AppException(
+                "HANDOVER_NOT_READY_FOR_PAYMENT",
+                "Chỉ KTV trưởng mới được tạo mã QR hoặc nhận tiền sau khi phiếu bàn giao đã được Quản lý duyệt xuất kho và chuyến giao đã xuất phát (hoặc đã giao hàng xong).",
+                StatusCodes.Status409Conflict);
         }
     }
 
@@ -810,97 +1176,97 @@ public sealed class PaymentService(
         switch (targetType)
         {
             case PaymentTargetType.Deposit:
-            {
-                var remaining = contract.DepositRequiredAmount - contract.DepositPaidAmount;
-                if (remaining <= 0)
-                    throw new AppException("ALREADY_PAID", "Khoản đặt cọc đã được thanh toán đủ.", StatusCodes.Status409Conflict);
+                {
+                    var remaining = contract.DepositRequiredAmount - contract.DepositPaidAmount;
+                    if (remaining <= 0)
+                        throw new AppException("ALREADY_PAID", "Khoản đặt cọc đã được thanh toán đủ.", StatusCodes.Status409Conflict);
 
-                return new ResolvedPayableTarget(
-                    null,
-                    null,
-                    remaining,
-                    VnpayLibrary.SanitizeOrderInfo($"DAT COC {contract.ContractCode}"));
-            }
+                    return new ResolvedPayableTarget(
+                        null,
+                        null,
+                        remaining,
+                        VnpayLibrary.SanitizeOrderInfo($"DAT COC {contract.ContractCode}"));
+                }
 
             case PaymentTargetType.RentalInstallment:
             case PaymentTargetType.Charge:
-            {
-                if (rentalChargeId is null)
-                    throw new AppException("CHARGE_ID_REQUIRED", "Vui lòng chọn khoản thu cần thanh toán.", StatusCodes.Status400BadRequest, "rentalChargeId");
-
-                var charge = await db.RentalCharges
-                    .AsNoTracking()
-                    .SingleOrDefaultAsync(c => c.Id == rentalChargeId.Value && c.RentalContractId == contract.Id, cancellationToken)
-                    ?? throw new AppException("CHARGE_NOT_FOUND", "Không tìm thấy khoản thanh toán thuộc hợp đồng này.", StatusCodes.Status404NotFound);
-
-                if (charge.Status is RentalChargeStatus.Paid or RentalChargeStatus.Waived or RentalChargeStatus.Cancelled)
-                    throw new AppException("ALREADY_PAID", "Khoản thu này đã được thanh toán hoặc miễn giảm.", StatusCodes.Status409Conflict);
-
-                var remaining = charge.Amount - charge.PaidAmount;
-                if (remaining <= 0)
-                    throw new AppException("ALREADY_PAID", "Khoản thu này đã thanh toán đủ.", StatusCodes.Status409Conflict);
-
-                string orderInfo;
-                if (charge.ChargeType == "RENTAL")
                 {
-                    var installmentOrder = await db.RentalCharges.AsNoTracking()
-                        .Where(c => c.RentalContractId == contract.Id && c.ChargeType == "RENTAL" && c.Status != RentalChargeStatus.Cancelled)
-                        .OrderBy(c => c.PeriodStart).ThenBy(c => c.CreatedAt)
-                        .Select(c => c.Id)
-                        .ToListAsync(cancellationToken);
+                    if (rentalChargeId is null)
+                        throw new AppException("CHARGE_ID_REQUIRED", "Vui lòng chọn khoản thu cần thanh toán.", StatusCodes.Status400BadRequest, "rentalChargeId");
 
-                    var idx = Math.Max(1, installmentOrder.IndexOf(charge.Id) + 1);
-                    orderInfo = VnpayLibrary.SanitizeOrderInfo($"TIEN THUE DOT {idx} {contract.ContractCode}");
-                }
-                else
-                {
-                    orderInfo = VnpayLibrary.SanitizeOrderInfo($"PHAT {charge.ChargeType} {contract.ContractCode}");
-                }
+                    var charge = await db.RentalCharges
+                        .AsNoTracking()
+                        .SingleOrDefaultAsync(c => c.Id == rentalChargeId.Value && c.RentalContractId == contract.Id, cancellationToken)
+                        ?? throw new AppException("CHARGE_NOT_FOUND", "Không tìm thấy khoản thanh toán thuộc hợp đồng này.", StatusCodes.Status404NotFound);
 
-                return new ResolvedPayableTarget(charge.Id, incidentChargeId, remaining, orderInfo);
-            }
+                    if (charge.Status is RentalChargeStatus.Paid or RentalChargeStatus.Waived or RentalChargeStatus.Cancelled)
+                        throw new AppException("ALREADY_PAID", "Khoản thu này đã được thanh toán hoặc miễn giảm.", StatusCodes.Status409Conflict);
+
+                    var remaining = charge.Amount - charge.PaidAmount;
+                    if (remaining <= 0)
+                        throw new AppException("ALREADY_PAID", "Khoản thu này đã thanh toán đủ.", StatusCodes.Status409Conflict);
+
+                    string orderInfo;
+                    if (charge.ChargeType == "RENTAL")
+                    {
+                        var installmentOrder = await db.RentalCharges.AsNoTracking()
+                            .Where(c => c.RentalContractId == contract.Id && c.ChargeType == "RENTAL" && c.Status != RentalChargeStatus.Cancelled)
+                            .OrderBy(c => c.PeriodStart).ThenBy(c => c.CreatedAt)
+                            .Select(c => c.Id)
+                            .ToListAsync(cancellationToken);
+
+                        var idx = Math.Max(1, installmentOrder.IndexOf(charge.Id) + 1);
+                        orderInfo = VnpayLibrary.SanitizeOrderInfo($"TIEN THUE DOT {idx} {contract.ContractCode}");
+                    }
+                    else
+                    {
+                        orderInfo = VnpayLibrary.SanitizeOrderInfo($"PHAT {charge.ChargeType} {contract.ContractCode}");
+                    }
+
+                    return new ResolvedPayableTarget(charge.Id, incidentChargeId, remaining, orderInfo);
+                }
 
             case PaymentTargetType.IncidentCharge:
-            {
-                if (incidentChargeId is null)
-                    throw new AppException("INCIDENT_CHARGE_ID_REQUIRED", "Vui lòng chọn khoản phí sự cố.", StatusCodes.Status400BadRequest, "incidentChargeId");
-
-                var row = await (
-                    from ic in db.IncidentCharges.AsNoTracking()
-                    join ii in db.EquipmentIncidentItems.AsNoTracking() on ic.IncidentItemId equals ii.Id
-                    join inc in db.EquipmentIncidents.AsNoTracking() on ii.IncidentId equals inc.Id
-                    where ic.Id == incidentChargeId.Value && inc.CompanyId == contract.CompanyId
-                    select new { ic, inc.IncidentCode }
-                ).SingleOrDefaultAsync(cancellationToken)
-                    ?? throw new AppException("INCIDENT_CHARGE_NOT_FOUND", "Không tìm thấy khoản phí sự cố.", StatusCodes.Status404NotFound);
-
-                if (row.ic.RentalChargeId.HasValue)
                 {
-                    var rc = await db.RentalCharges.AsNoTracking()
-                        .SingleOrDefaultAsync(c => c.Id == row.ic.RentalChargeId.Value, cancellationToken);
-                    if (rc is not null)
+                    if (incidentChargeId is null)
+                        throw new AppException("INCIDENT_CHARGE_ID_REQUIRED", "Vui lòng chọn khoản phí sự cố.", StatusCodes.Status400BadRequest, "incidentChargeId");
+
+                    var row = await (
+                        from ic in db.IncidentCharges.AsNoTracking()
+                        join ii in db.EquipmentIncidentItems.AsNoTracking() on ic.IncidentItemId equals ii.Id
+                        join inc in db.EquipmentIncidents.AsNoTracking() on ii.IncidentId equals inc.Id
+                        where ic.Id == incidentChargeId.Value && inc.CompanyId == contract.CompanyId
+                        select new { ic, inc.IncidentCode }
+                    ).SingleOrDefaultAsync(cancellationToken)
+                        ?? throw new AppException("INCIDENT_CHARGE_NOT_FOUND", "Không tìm thấy khoản phí sự cố.", StatusCodes.Status404NotFound);
+
+                    if (row.ic.RentalChargeId.HasValue)
                     {
-                        var remaining = rc.Amount - rc.PaidAmount;
-                        if (rc.Status is RentalChargeStatus.Paid or RentalChargeStatus.Waived or RentalChargeStatus.Cancelled || remaining <= 0)
-                            throw new AppException("ALREADY_PAID", "Khoản phí sự cố đã được thanh toán.", StatusCodes.Status409Conflict);
+                        var rc = await db.RentalCharges.AsNoTracking()
+                            .SingleOrDefaultAsync(c => c.Id == row.ic.RentalChargeId.Value, cancellationToken);
+                        if (rc is not null)
+                        {
+                            var remaining = rc.Amount - rc.PaidAmount;
+                            if (rc.Status is RentalChargeStatus.Paid or RentalChargeStatus.Waived or RentalChargeStatus.Cancelled || remaining <= 0)
+                                throw new AppException("ALREADY_PAID", "Khoản phí sự cố đã được thanh toán.", StatusCodes.Status409Conflict);
 
-                        return new ResolvedPayableTarget(
-                            rc.Id,
-                            row.ic.Id,
-                            remaining,
-                            VnpayLibrary.SanitizeOrderInfo($"PHI SU CO {row.IncidentCode} {contract.ContractCode}"));
+                            return new ResolvedPayableTarget(
+                                rc.Id,
+                                row.ic.Id,
+                                remaining,
+                                VnpayLibrary.SanitizeOrderInfo($"PHI SU CO {row.IncidentCode} {contract.ContractCode}"));
+                        }
                     }
+
+                    if (row.ic.Status != IncidentChargeStatus.Pending || row.ic.Amount <= 0)
+                        throw new AppException("ALREADY_PAID", "Khoản phí sự cố không còn cần thanh toán.", StatusCodes.Status409Conflict);
+
+                    return new ResolvedPayableTarget(
+                        null,
+                        row.ic.Id,
+                        row.ic.Amount,
+                        VnpayLibrary.SanitizeOrderInfo($"PHI SU CO {row.IncidentCode} {contract.ContractCode}"));
                 }
-
-                if (row.ic.Status != IncidentChargeStatus.Pending || row.ic.Amount <= 0)
-                    throw new AppException("ALREADY_PAID", "Khoản phí sự cố không còn cần thanh toán.", StatusCodes.Status409Conflict);
-
-                return new ResolvedPayableTarget(
-                    null,
-                    row.ic.Id,
-                    row.ic.Amount,
-                    VnpayLibrary.SanitizeOrderInfo($"PHI SU CO {row.IncidentCode} {contract.ContractCode}"));
-            }
 
             default:
                 throw new AppException("INVALID_TARGET_TYPE", "Loại khoản thanh toán không hợp lệ.", StatusCodes.Status400BadRequest);

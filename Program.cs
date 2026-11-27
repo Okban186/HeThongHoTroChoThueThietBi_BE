@@ -1,4 +1,3 @@
-
 using HeThongHoTroChoThueThietBi.Infrastructure.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Identity.Services;
 using HeThongHoTroChoThueThietBi.Common.Security;
@@ -17,6 +16,11 @@ using HeThongHoTroChoThueThietBi.Features.Finance.Services;
 using HeThongHoTroChoThueThietBi.Features.Organization.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.Configurations;
 using HeThongHoTroChoThueThietBi.Features.Customer.Services;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Abstractions;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Configurations;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Services;
+using HeThongHoTroChoThueThietBi.Features.Notification.Services;
+using HeThongHoTroChoThueThietBi.Features.Maintenance.Services;
 using HeThongHoTroChoThueThietBi.Features.Operations.Services;
 using HeThongHoTroChoThueThietBi.Features.Rental.Services;
 
@@ -75,6 +79,17 @@ builder.Services.AddSingleton<Cloudinary>(serviceProvider =>
 
 builder.Services.AddScoped<IFileUploadService, CloudinaryUploadService>();
 
+builder.Services.Configure<EmailOptions>(
+    builder.Configuration.GetSection(EmailOptions.SectionName)
+);
+builder.Services.Configure<FirebaseOptions>(
+    builder.Configuration.GetSection(FirebaseOptions.SectionName)
+);
+builder.Services.AddScoped<IEmailService, SmtpEmailService>();
+builder.Services.AddSingleton<IPushNotificationService, FirebasePushNotificationService>();
+builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
+builder.Services.AddScoped<NotificationService>();
+
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<UserManagementService>();
 
@@ -94,6 +109,8 @@ builder.Services.AddHttpClient<ShippingFeeService>(client =>
 });
 builder.Services.AddScoped<ReservationService>();
 builder.Services.AddScoped<ContractService>();
+builder.Services.AddHostedService<UnpaidDepositCancellationWorker>();
+builder.Services.AddHostedService<ContractLifecycleWorker>();
 builder.Services.AddScoped<CustomerPortalService>();
 builder.Services.AddScoped<CustomerIncidentService>();
 builder.Services.AddScoped<HandoverService>();
@@ -103,6 +120,7 @@ builder.Services.AddScoped<EquipmentReturnService>();
 builder.Services.Configure<VnpayOptions>(
     builder.Configuration.GetSection(VnpayOptions.SectionName)
 );
+builder.Services.AddScoped<CompanyDebtGuardService>();
 builder.Services.AddScoped<PaymentService>();
 builder.Services.Configure<LessorOptions>(
     builder.Configuration.GetSection(LessorOptions.SectionName)
@@ -119,6 +137,13 @@ builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<EquipmentAvailabilityService>();
 builder.Services.AddScoped<EquipmentModelService>();
 builder.Services.AddScoped<StorekeeperEquipmentService>();
+
+// Operations (Manager)
+builder.Services.AddHttpClient<RouteOptimizationService>();
+builder.Services.AddScoped<ManagerOperationsService>();
+builder.Services.AddScoped<TechnicianOperationsService>();
+builder.Services.AddScoped<TechnicianMaintenanceService>();
+builder.Services.AddScoped<TechnicianIncidentService>();
 
 // Đặt là true nếu muốn dùng Neon, false nếu muốn dùng Local
 bool useNeon = builder.Configuration.GetValue<bool>("UseNeonCloud");

@@ -30,8 +30,7 @@ public sealed class CreateCashPaymentRequest
     [Range(1000, 999_999_999_999, ErrorMessage = "Số tiền thu không hợp lệ.")]
     public decimal Amount { get; init; }
 
-    /// <summary>Ảnh phiếu thu / biên bản thu tiền mặt đã ký hai bên (StorageFileId).</summary>
-    [Required(ErrorMessage = "Vui lòng chụp ảnh phiếu thu / biên bản ký hai bên.")]
+    /// <summary>Ảnh phiếu thu / biên bản thu tiền mặt đã ký hai bên (StorageFileId, tùy chọn khi Sales thu trực tiếp).</summary>
     public Guid? ReceiptFileId { get; init; }
 
     [MaxLength(1000)]
