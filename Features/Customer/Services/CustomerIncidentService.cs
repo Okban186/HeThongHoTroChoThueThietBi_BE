@@ -3,6 +3,7 @@ using HeThongHoTroChoThueThietBi.Common.FileStorage.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Dtos;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Extensions;
 using HeThongHoTroChoThueThietBi.Common.FileStorage.Models;
+using HeThongHoTroChoThueThietBi.Common.Notifications.Abstractions;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Customer.DTOs;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Enums;
@@ -27,7 +28,8 @@ namespace HeThongHoTroChoThueThietBi.Features.Customer.Services;
 /// </summary>
 public sealed class CustomerIncidentService(
     AppDbContext db,
-    IFileUploadService uploadService)
+    IFileUploadService uploadService,
+    INotificationDispatcher notificationDispatcher)
 {
     private const string CodePrefix = "SC";
     private static readonly string[] ImageFormats = ["jpg", "jpeg", "png", "webp"];
@@ -75,6 +77,48 @@ public sealed class CustomerIncidentService(
 
         // Một máy có thể nằm ở nhiều phiếu (giao lại) — giữ một dòng.
         return rows.DistinctBy(r => r.EquipmentId).ToList();
+    }
+
+    /// <summary>Tra cứu chính xác máy đang thuê theo số Serial (quét barcode hoặc nhập tay) để khách báo sự cố nhanh.</summary>
+    public async Task<CustomerRentedEquipmentResponse> LookupRentedSerialAsync(
+        Guid companyId,
+        string serial,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = (serial ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new AppException(
+                "SERIAL_REQUIRED",
+                "Vui lòng nhập hoặc quét mã serial thiết bị.",
+                StatusCodes.Status400BadRequest,
+                "serial");
+        }
+
+        var eq = await db.Equipments.AsNoTracking()
+            .FirstOrDefaultAsync(e => e.SerialNumber.ToLower() == normalized.ToLower(), cancellationToken);
+
+        if (eq is null)
+        {
+            throw new AppException(
+                "SERIAL_NOT_FOUND",
+                $"Không tìm thấy thiết bị có mã serial {normalized}.", StatusCodes.Status404NotFound,
+                "serial");
+        }
+
+        var rented = await GetRentedEquipmentsAsync(companyId, cancellationToken);
+        var match = rented.FirstOrDefault(r => r.EquipmentId == eq.Id);
+
+        if (match is null)
+        {
+            throw new AppException(
+                "EQUIPMENT_NOT_RENTED_BY_COMPANY",
+                $"Thiết bị {eq.SerialNumber} hiện không nằm trong danh sách máy công ty bạn đang thuê (hoặc đã trả lại kho).",
+                StatusCodes.Status409Conflict,
+                "serial");
+        }
+
+        return match;
     }
 
     // ================================================================ ảnh
@@ -223,6 +267,42 @@ public sealed class CustomerIncidentService(
         {
             throw new AppException("DUPLICATE_INCIDENT_CODE", "Mã sự cố bị trùng, vui lòng thử lại.",
                 StatusCodes.Status409Conflict);
+        }
+
+        // Thông báo tới Quản lý phụ trách hợp đồng của các máy gặp sự cố (fallback toàn bộ Manager)
+        var assignedManagerIds = await (
+            from hn in db.HandoverNotes.AsNoTracking()
+            join hi in db.HandoverItems.AsNoTracking() on hn.Id equals hi.HandoverNoteId
+            join c in db.RentalContracts.AsNoTracking() on hn.RentalContractId equals c.Id
+            where equipmentIds.Contains(hi.EquipmentId)
+                  && c.CompanyId == companyId
+                  && c.ApprovedBy != null
+            select c.ApprovedBy!.Value
+        ).Distinct().ToListAsync(cancellationToken);
+
+        if (assignedManagerIds.Count == 0)
+        {
+            assignedManagerIds = await (
+                from ur in db.UserRoles.AsNoTracking()
+                join r in db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+                where r.Code == "MANAGER"
+                select ur.UserId
+            ).Distinct().ToListAsync(cancellationToken);
+        }
+
+        if (assignedManagerIds.Count > 0)
+        {
+            var companyName = await db.Companies.AsNoTracking()
+                .Where(c => c.Id == companyId)
+                .Select(c => c.Name)
+                .FirstOrDefaultAsync(cancellationToken) ?? "Khách hàng";
+
+            await notificationDispatcher.NotifyUsersAsync(
+                assignedManagerIds,
+                $"Khách hàng báo sự cố mới ({incident.IncidentCode})",
+                $"{companyName} vừa báo sự cố {incident.IncidentCode} ({equipmentIds.Count} thiết bị). Liên hệ: {incident.ContactName} ({incident.ContactPhone}). Mô tả: {incident.Description}",
+                "INCIDENT_REPORTED",
+                cancellationToken: cancellationToken);
         }
 
         return await GetIncidentAsync(incident.Id, companyId, cancellationToken);

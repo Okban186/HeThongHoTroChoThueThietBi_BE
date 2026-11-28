@@ -2,6 +2,7 @@ using HeThongHoTroChoThueThietBi.Common.Exceptions;
 using HeThongHoTroChoThueThietBi.Common.Persistence;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Enums;
 using HeThongHoTroChoThueThietBi.Features.Equipment.Services;
+using HeThongHoTroChoThueThietBi.Features.Finance.Services;
 using HeThongHoTroChoThueThietBi.Features.Organization.Enums;
 using HeThongHoTroChoThueThietBi.Features.Rental.Configurations;
 using HeThongHoTroChoThueThietBi.Features.Rental.DTOs;
@@ -35,6 +36,7 @@ namespace HeThongHoTroChoThueThietBi.Features.Rental.Services;
 public sealed class ReservationService(
     AppDbContext db,
     EquipmentAvailabilityService availabilityService,
+    CompanyDebtGuardService debtGuard,
     IOptions<ReservationOptions> options)
 {
     private const string CodePrefix = "PH";
@@ -149,6 +151,7 @@ public sealed class ReservationService(
     {
         var (from, to) = ValidateDates(request.RequestedFrom!.Value, request.RequestedTo!.Value);
         await EnsureCompanyActiveAsync(request.CompanyId!.Value, cancellationToken);
+        await debtGuard.EnsureCompanyHasNoBlockingDebtAsync(request.CompanyId!.Value);
 
         var now = DateTimeOffset.UtcNow;
 
@@ -307,6 +310,10 @@ public sealed class ReservationService(
                 StatusCodes.Status409Conflict);
         }
 
+        // Kiểm tra lại ngày bắt đầu thuê (phòng trường hợp phiếu lập từ nhiều ngày trước nay đã sát ngày thuê)
+        ValidateDates(reservation.RequestedFrom, reservation.RequestedTo);
+        await debtGuard.EnsureCompanyHasNoBlockingDebtAsync(reservation.CompanyId);
+
         // Kiểm tra lại: số máy có thể đã thay đổi từ lúc thêm thiết bị.
         await EnsureAvailableAsync(
             items.ToDictionary(i => i.EquipmentModelId, i => i.Quantity),
@@ -398,13 +405,16 @@ public sealed class ReservationService(
 
     private static DateTimeOffset Min(DateTimeOffset a, DateTimeOffset b) => a <= b ? a : b;
 
+    private const int MinAdvanceBookingDays = 3;
+
     private static (DateOnly From, DateOnly To) ValidateDates(DateOnly from, DateOnly to)
     {
-        if (from < EquipmentAvailabilityService.BusinessToday())
+        var minStartDate = EquipmentAvailabilityService.BusinessToday().AddDays(MinAdvanceBookingDays);
+        if (from < minStartDate)
         {
             throw new AppException(
-                "REQUESTED_FROM_IN_PAST",
-                "Ngày bắt đầu thuê không được trước hôm nay.",
+                "REQUESTED_FROM_TOO_SOON",
+                $"Ngày bắt đầu thuê phải cách hôm nay tối thiểu {MinAdvanceBookingDays} ngày (từ {minStartDate:dd/MM/yyyy} trở đi) để kịp ký duyệt, đặt cọc và chuẩn bị thiết bị.",
                 StatusCodes.Status400BadRequest,
                 "requestedFrom");
         }

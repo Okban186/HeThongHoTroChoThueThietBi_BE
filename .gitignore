@@ -484,3 +484,5 @@ $RECYCLE.BIN/
 .vscode
 # Environment-specific configuration
 appsettings.Development.json
+
+firebase-service-account.json

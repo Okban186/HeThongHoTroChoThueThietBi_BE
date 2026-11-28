@@ -35,16 +35,6 @@ public class EquipmentIncident
     [Required]
     public EquipmentIncidentStatus Status { get; set; }
 
-    [Column("resolution")]
-    public string? Resolution { get; set; }
-
-    [Column("created_at", TypeName = "timestamp with time zone")]
-    public DateTimeOffset CreatedAt { get; set; }
-
-    [Column("updated_at", TypeName = "timestamp with time zone")]
-    public DateTimeOffset UpdatedAt { get; set; }
-
-    // Các cột bổ sung 2026-11-24 (sự cố do khách hàng COMPANY báo).
     [Column("reported_by")]
     public Guid? ReportedBy { get; set; }
 
@@ -55,5 +45,20 @@ public class EquipmentIncident
     [Column("contact_phone")]
     [MaxLength(20)]
     public string? ContactPhone { get; set; }
+
+    [Column("remote_technician_staff_id")]
+    public Guid? RemoteTechnicianStaffId { get; set; }
+
+    [Column("service_assignment_id")]
+    public Guid? ServiceAssignmentId { get; set; }
+
+    [Column("resolution")]
+    public string? Resolution { get; set; }
+
+    [Column("created_at", TypeName = "timestamp with time zone")]
+    public DateTimeOffset CreatedAt { get; set; }
+
+    [Column("updated_at", TypeName = "timestamp with time zone")]
+    public DateTimeOffset UpdatedAt { get; set; }
 
 }

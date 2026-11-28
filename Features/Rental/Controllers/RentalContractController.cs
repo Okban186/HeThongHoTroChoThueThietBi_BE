@@ -37,9 +37,11 @@ public sealed class RentalContractController(
 
     /// <summary>Tổng quan chi phí, các đợt tiền thuê, khoản phạt và giao dịch thanh toán của hợp đồng.</summary>
     [HttpGet("{id:guid}/billing")]
+    [Authorize(Roles = "SALES,MANAGER,TECHNICIAN")]
     public async Task<ActionResult<ContractBillingSummaryResponse>> GetBilling(Guid id, CancellationToken cancellationToken)
     {
-        return Ok(await paymentService.GetContractBillingAsync(id, CurrentUserId(), isCustomer: false, CanViewAll(), cancellationToken));
+        var canViewAll = CanViewAll() || User.IsInRole("TECHNICIAN");
+        return Ok(await paymentService.GetContractBillingAsync(id, CurrentUserId(), isCustomer: false, canViewAll, cancellationToken));
     }
 
     /// <summary>
@@ -173,6 +175,60 @@ public sealed class RentalContractController(
     {
         return Ok(await contractService.CancelAsync(id, request, CurrentUserId(), cancellationToken));
     }
+
+    /// <summary>Manager duyệt bản PDF đã ký (SIGNED → PREPARING).</summary>
+    [HttpPost("{id:guid}/confirm-signed")]
+    [Authorize(Roles = "MANAGER")]
+    public async Task<ActionResult<RentalContractDetailResponse>> ConfirmSigned(
+        Guid id, CancellationToken cancellationToken)
+        => Ok(await contractService.ConfirmSignedAsync(id, CurrentUserId(), cancellationToken));
+
+    /// <summary>Manager từ chối bản PDF đã ký (SIGNED → PENDING_SIGNATURE).</summary>
+    [HttpPost("{id:guid}/reject-signed")]
+    [Authorize(Roles = "MANAGER")]
+    public async Task<ActionResult<RentalContractDetailResponse>> RejectSigned(
+        Guid id, [FromBody] RejectRentalContractRequest request, CancellationToken cancellationToken)
+        => Ok(await contractService.RejectSignedAsync(id, request, CurrentUserId(), cancellationToken));
+
+    /// <summary>Sales gửi yêu cầu hủy từ bước PREPARING trở đi (→ CANCELLATION_REQUESTED).</summary>
+    [HttpPost("{id:guid}/request-cancel")]
+    [Authorize(Roles = "SALES")]
+    public async Task<ActionResult<RentalContractDetailResponse>> RequestCancel(
+        Guid id, [FromBody] CancelRentalContractRequest request, CancellationToken cancellationToken)
+        => Ok(await contractService.RequestCancelAsync(id, request, CurrentUserId(), cancellationToken));
+
+    /// <summary>Manager hủy hợp đồng hoặc duyệt/từ chối yêu cầu hủy.</summary>
+    [HttpPost("{id:guid}/manager-cancel")]
+    [Authorize(Roles = "MANAGER")]
+    public async Task<ActionResult<RentalContractDetailResponse>> ManagerCancel(
+        Guid id,
+        [FromQuery] bool approve = true,
+        [FromBody] CancelRentalContractRequest? request = null,
+        CancellationToken cancellationToken = default)
+        => Ok(await contractService.ManagerDecideCancelAsync(
+            id,
+            approve,
+            request?.Reason,
+            request?.PenaltyAmount,
+            request?.TransportFeeAmount,
+            CurrentUserId(),
+            cancellationToken));
+
+    /// <summary>Xem trước bảng đối soát quyết toán cuối hợp đồng (cấn trừ cọc, hoàn cọc dư, công nợ còn thiếu).</summary>
+    [HttpGet("{id:guid}/settlement-preview")]
+    [Authorize(Roles = "MANAGER")]
+    public async Task<ActionResult<ContractSettlementPreviewResponse>> GetSettlementPreview(
+        Guid id, CancellationToken cancellationToken)
+        => Ok(await contractService.GetSettlementPreviewAsync(id, CurrentUserId(), cancellationToken));
+
+    /// <summary>Manager xác nhận quyết toán cuối hợp đồng: cấn trừ cọc, ghi nhận hoàn cọc dư và chốt COMPLETED.</summary>
+    [HttpPost("{id:guid}/settle")]
+    [Authorize(Roles = "MANAGER")]
+    public async Task<ActionResult<SettleContractResponse>> SettleContract(
+        Guid id,
+        [FromBody] SettleContractRequest request,
+        CancellationToken cancellationToken)
+        => Ok(await contractService.SettleContractAsync(id, request, CurrentUserId(), cancellationToken));
 
     // Claim NameIdentifier do JwtAuthenticationHandler tạo.
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);

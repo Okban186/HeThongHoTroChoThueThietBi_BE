@@ -34,4 +34,7 @@ public class ContractStatusHistory
     [Column("note")]
     public string? Note { get; set; }
 
+    [Column("created_at", TypeName = "timestamp with time zone")]
+    public DateTimeOffset CreatedAt { get; set; }
+
 }

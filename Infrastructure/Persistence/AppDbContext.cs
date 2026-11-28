@@ -161,6 +161,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Name).HasColumnType("varchar(255)").IsRequired();
             entity.Property(x => x.TaxCode).HasColumnType("varchar(50)").IsRequired();
             entity.Property(x => x.Address).HasColumnType("text");
+            entity.Property(x => x.CreatedBy);
             entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'ACTIVE'").IsRequired();
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
@@ -218,6 +219,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Code).HasColumnType("varchar(50)").IsRequired();
             entity.Property(x => x.Name).HasColumnType("varchar(150)").IsRequired();
             entity.Property(x => x.Address).HasColumnType("text");
+            entity.Property(x => x.Latitude);
+            entity.Property(x => x.Longitude);
             entity.Property(x => x.Phone).HasColumnType("varchar(20)");
             entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'ACTIVE'").IsRequired();
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
@@ -408,6 +411,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ChangedBy).IsRequired();
             entity.Property(x => x.ChangedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.Note).HasColumnType("text");
+            entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasOne<RentalContract>().WithMany().HasForeignKey(x => x.RentalContractId);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.ChangedBy);
         });
@@ -449,7 +453,17 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ServiceAssignmentId);
             entity.Property(x => x.HandoverDate).IsRequired();
             entity.Property(x => x.ReplacementRequestId);
+            entity.Property(x => x.HandoverType).HasColumnType("varchar(30)").HasDefaultValueSql("'INITIAL'").IsRequired();
+            entity.Property(x => x.ParentHandoverId);
+            entity.Property(x => x.IncidentId);
+            entity.Property(x => x.AssignedStorekeeperId);
             entity.Property(x => x.DeliveryAttemptNumber).HasDefaultValueSql("1").IsRequired();
+            entity.Property(x => x.StopOrder).HasDefaultValueSql("1").IsRequired();
+            entity.Property(x => x.DeliveryLatitude);
+            entity.Property(x => x.DeliveryLongitude);
+            entity.Property(x => x.EstimatedTravelMinutes).HasDefaultValueSql("0").IsRequired();
+            entity.Property(x => x.EstimatedInstallMinutes).HasDefaultValueSql("0").IsRequired();
+            entity.Property(x => x.ApprovalNote).HasColumnType("text");
             entity.Property(x => x.FailedReason).HasColumnType("text");
             entity.Property(x => x.FailedAt).HasColumnType("timestamp with time zone");
             entity.Property(x => x.ReceivedByName).HasColumnType("varchar(150)").IsRequired();
@@ -464,6 +478,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasOne<ServiceAssignment>().WithMany().HasForeignKey(x => x.ServiceAssignmentId);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.CreatedBy);
             entity.HasOne<ReplacementRequest>().WithMany().HasForeignKey(x => x.ReplacementRequestId);
+            entity.HasOne<HandoverNote>().WithMany().HasForeignKey(x => x.ParentHandoverId);
+            entity.HasOne<EquipmentIncident>().WithMany().HasForeignKey(x => x.IncidentId);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.AssignedStorekeeperId);
         });
         modelBuilder.Entity<HandoverItem>(entity =>
         {
@@ -507,15 +524,25 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
             entity.Property(x => x.ReturnCode).HasColumnType("varchar(50)").IsRequired();
             entity.Property(x => x.RentalContractId).IsRequired();
+            entity.Property(x => x.ServiceAssignmentId);
+            entity.Property(x => x.StopOrder).HasDefaultValueSql("1").IsRequired();
+            entity.Property(x => x.PickupLatitude);
+            entity.Property(x => x.PickupLongitude);
+            entity.Property(x => x.EstimatedTravelMinutes).HasDefaultValueSql("0").IsRequired();
+            entity.Property(x => x.EstimatedUninstallMinutes).HasDefaultValueSql("0").IsRequired();
             entity.Property(x => x.ReturnedAt).HasColumnType("timestamp with time zone").IsRequired();
             entity.Property(x => x.ReceivedBy).IsRequired();
+            entity.Property(x => x.AssignedStorekeeperId);
             entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'DRAFT'").IsRequired();
+            entity.Property(x => x.ReturnType).HasColumnType("varchar(30)").HasDefaultValueSql("'NORMAL'").IsRequired();
             entity.Property(x => x.Note).HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => x.ReturnCode).IsUnique();
             entity.HasOne<RentalContract>().WithMany().HasForeignKey(x => x.RentalContractId);
+            entity.HasOne<ServiceAssignment>().WithMany().HasForeignKey(x => x.ServiceAssignmentId);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.ReceivedBy);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.AssignedStorekeeperId);
         });
         modelBuilder.Entity<EquipmentReturnItem>(entity =>
         {
@@ -564,11 +591,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ReportedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.ResolvedAt).HasColumnType("timestamp with time zone");
             entity.Property(x => x.Status).HasColumnType("varchar(30)").HasDefaultValueSql("'OPEN'").IsRequired();
+            entity.Property(x => x.ReportedBy);
+            entity.Property(x => x.ContactName).HasColumnType("varchar(150)");
+            entity.Property(x => x.ContactPhone).HasColumnType("varchar(20)");
+            entity.Property(x => x.RemoteTechnicianStaffId);
+            entity.Property(x => x.ServiceAssignmentId);
             entity.Property(x => x.Resolution).HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => x.IncidentCode).IsUnique();
             entity.HasOne<Company>().WithMany().HasForeignKey(x => x.CompanyId);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.ReportedBy);
+            entity.HasOne<Staff>().WithMany().HasForeignKey(x => x.RemoteTechnicianStaffId);
+            entity.HasOne<ServiceAssignment>().WithMany().HasForeignKey(x => x.ServiceAssignmentId);
         });
         modelBuilder.Entity<EquipmentIncidentItem>(entity =>
         {
@@ -578,9 +613,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.EquipmentId).IsRequired();
             entity.Property(x => x.Description).HasColumnType("text");
             entity.Property(x => x.Assessment).HasColumnType("text");
+            entity.Property(x => x.FaultType).HasColumnType("varchar(30)");
+            entity.Property(x => x.ReplacementHandoverNoteId);
             entity.Property(x => x.Note).HasColumnType("text");
             entity.HasOne<EquipmentIncident>().WithMany().HasForeignKey(x => x.IncidentId);
             entity.HasOne<Equipment>().WithMany().HasForeignKey(x => x.EquipmentId);
+            entity.HasOne<HandoverNote>().WithMany().HasForeignKey(x => x.ReplacementHandoverNoteId);
         });
         modelBuilder.Entity<IncidentCharge>(entity =>
         {
@@ -590,11 +628,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ChargeType).HasColumnType("varchar(20)").IsRequired();
             entity.Property(x => x.Description).HasColumnType("text");
             entity.Property(x => x.Amount).HasColumnType("numeric(18,2)").HasDefaultValueSql("0").IsRequired();
-            entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'PENDING'").IsRequired();
+            entity.Property(x => x.Status).HasColumnType("varchar(30)").HasDefaultValueSql("'PENDING'").IsRequired();
             entity.Property(x => x.RentalChargeId);
+            entity.Property(x => x.ProposedBy);
+            entity.Property(x => x.ApprovedBy);
+            entity.Property(x => x.ApprovedAt).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.SettlementMethod).HasColumnType("varchar(30)");
+            entity.Property(x => x.DepositOffsetAmount).HasColumnType("numeric(18,2)").HasDefaultValueSql("0").IsRequired();
+            entity.Property(x => x.ManagerNote).HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasOne<EquipmentIncidentItem>().WithMany().HasForeignKey(x => x.IncidentItemId);
             entity.HasOne<RentalCharge>().WithMany().HasForeignKey(x => x.RentalChargeId);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.ProposedBy);
+            entity.HasOne<User>().WithMany().HasForeignKey(x => x.ApprovedBy);
         });
         modelBuilder.Entity<ReplacementRequest>(entity =>
         {
@@ -624,6 +670,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
             entity.Property(x => x.ReplacementRequestId).IsRequired();
             entity.Property(x => x.OldEquipmentId).IsRequired();
+            entity.Property(x => x.ReplacementModelId);
             entity.Property(x => x.Note).HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => new { x.ReplacementRequestId, x.OldEquipmentId }).IsUnique();
@@ -636,6 +683,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
             entity.Property(x => x.EquipmentId).IsRequired();
             entity.Property(x => x.ServiceAssignmentId);
+            entity.Property(x => x.AssignedTechnicianStaffId);
             entity.Property(x => x.Type).HasColumnType("varchar(20)").IsRequired();
             entity.Property(x => x.Description).HasColumnType("text").IsRequired();
             entity.Property(x => x.ScheduledAt).HasColumnType("timestamp with time zone");
@@ -647,6 +695,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.UpdatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasOne<Equipment>().WithMany().HasForeignKey(x => x.EquipmentId);
             entity.HasOne<ServiceAssignment>().WithMany().HasForeignKey(x => x.ServiceAssignmentId);
+            entity.HasOne<Staff>().WithMany().HasForeignKey(x => x.AssignedTechnicianStaffId);
         });
         modelBuilder.Entity<MaintenanceRecord>(entity =>
         {
@@ -683,7 +732,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Method).HasColumnType("varchar(20)").IsRequired();
             entity.Property(x => x.Amount).HasColumnType("numeric(18,2)").HasDefaultValueSql("0").IsRequired();
             entity.Property(x => x.Description).HasColumnType("text");
-            entity.Property(x => x.ApprovedBy).IsRequired();
+            entity.Property(x => x.ApprovedBy);
+            entity.Property(x => x.RequestedBy);
+            entity.Property(x => x.Status).HasColumnType("varchar(20)").HasDefaultValueSql("'PENDING'").IsRequired();
+            entity.Property(x => x.ApprovedAt).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.RejectionReason).HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => x.EquipmentId).IsUnique();
             entity.HasOne<Equipment>().WithMany().HasForeignKey(x => x.EquipmentId);
@@ -747,10 +800,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
             entity.Property(x => x.HandoverIssueId).IsRequired();
+            entity.Property(x => x.HandoverIssueItemId);
             entity.Property(x => x.StorageFileId).IsRequired();
             entity.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
             entity.HasIndex(x => new { x.HandoverIssueId, x.StorageFileId }).IsUnique();
             entity.HasOne<HandoverIssue>().WithMany().HasForeignKey(x => x.HandoverIssueId);
+            entity.HasOne<HandoverIssueItem>().WithMany().HasForeignKey(x => x.HandoverIssueItemId);
             entity.HasOne<StorageFile>().WithMany().HasForeignKey(x => x.StorageFileId);
         });
         modelBuilder.Entity<EquipmentIncidentAttachment>(entity =>
@@ -880,6 +935,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()").IsRequired();
             entity.Property(x => x.RentalContractId).IsRequired();
+            entity.Property(x => x.RentalChargeId);
+            entity.Property(x => x.IncidentChargeId);
+            entity.Property(x => x.ReceiptFileId);
+            entity.Property(x => x.VerifiedBy);
             entity.Property(x => x.TargetType).HasColumnType("varchar(30)").IsRequired();
             entity.Property(x => x.PaymentMethod).HasColumnType("varchar(20)").IsRequired();
             entity.Property(x => x.TxnRef).HasColumnType("varchar(100)").IsRequired();

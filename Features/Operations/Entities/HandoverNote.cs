@@ -29,8 +29,39 @@ public class HandoverNote
     [Column("replacement_request_id")]
     public Guid? ReplacementRequestId { get; set; }
 
+    /// <summary>INITIAL (phiếu gốc) | SUPPLEMENTARY (giao bù máy lỗi khi giao) | INCIDENT_REPLACEMENT (giao máy thay thế sự cố).</summary>
+    [Column("handover_type")]
+    [MaxLength(30)]
+    [Required]
+    public string HandoverType { get; set; } = "INITIAL";
+
+    [Column("parent_handover_id")]
+    public Guid? ParentHandoverId { get; set; }
+
+    /// <summary>Liên kết sự cố nguồn khi HandoverType = INCIDENT_REPLACEMENT.</summary>
+    [Column("incident_id")]
+    public Guid? IncidentId { get; set; }
+
     [Column("delivery_attempt_number")]
     public int DeliveryAttemptNumber { get; set; }
+
+    [Column("stop_order")]
+    public int StopOrder { get; set; } = 1;
+
+    [Column("delivery_latitude")]
+    public double? DeliveryLatitude { get; set; }
+
+    [Column("delivery_longitude")]
+    public double? DeliveryLongitude { get; set; }
+
+    [Column("estimated_travel_minutes")]
+    public int EstimatedTravelMinutes { get; set; }
+
+    [Column("estimated_install_minutes")]
+    public int EstimatedInstallMinutes { get; set; }
+
+    [Column("approval_note")]
+    public string? ApprovalNote { get; set; }
 
     [Column("failed_reason")]
     public string? FailedReason { get; set; }
@@ -54,6 +85,10 @@ public class HandoverNote
     [MaxLength(20)]
     [Required]
     public HandoverNoteStatus Status { get; set; }
+
+    /// <summary>Thủ kho đã tiếp nhận soạn phiếu này (NULL = chưa ai nhận, tất cả Thủ kho đều thấy).</summary>
+    [Column("assigned_storekeeper_id")]
+    public Guid? AssignedStorekeeperId { get; set; }
 
     [Column("created_by")]
     public Guid CreatedBy { get; set; }

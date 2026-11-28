@@ -20,6 +20,7 @@ public sealed class CustomerPortalService(AppDbContext db)
     private static readonly RentalContractStatus[] ActiveStatuses =
     [
         RentalContractStatus.Signed,
+        RentalContractStatus.PendingDeposit,
         RentalContractStatus.Preparing,
         RentalContractStatus.PartiallyDelivered,
         RentalContractStatus.Delivered,
